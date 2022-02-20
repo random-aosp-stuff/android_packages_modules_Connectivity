@@ -226,7 +226,7 @@ public class UpstreamNetworkMonitor {
 
     private boolean isAllowedToUseVpnUpstreams() {
         return Settings.Secure.getInt(mContext.getContentResolver(),
-                TETHERING_ALLOW_VPN_UPSTREAMS, 0) == 1;
+                TETHERING_ALLOW_VPN_UPSTREAMS, 1) == 1;
     }
 
     private void reevaluateUpstreamRequirements(boolean tryCell, boolean autoUpstream,
