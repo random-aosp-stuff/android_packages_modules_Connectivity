@@ -478,7 +478,7 @@ public class PermissionMonitor {
 
     @VisibleForTesting
     static boolean isVendorApp(@NonNull ApplicationInfo appInfo) {
-        return appInfo.isVendor() || appInfo.isOem() || appInfo.isProduct();
+        return appInfo.isVendor() || appInfo.isOem();
     }
 
     @VisibleForTesting
