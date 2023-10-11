@@ -321,7 +321,7 @@ public class PermissionMonitor {
     }
 
     private static boolean hasSdkSandbox(final int uid) {
-        return SdkLevel.isAtLeastT() && Process.isApplicationUid(uid);
+        return false;
     }
 
     // Return the network permission for the passed list of apps. Note that this depends on the
