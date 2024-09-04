@@ -1,0 +1,5 @@
+[gerrit]
+host=review.calyxos.org
+port=29418
+project=CalyxOS/platform_packages_modules_Connectivity
+defaultbranch=staging/android15
