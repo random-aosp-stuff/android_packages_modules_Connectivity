@@ -22,6 +22,16 @@ aconfig_declarations {
     visibility: ["//packages/modules/Connectivity:__subpackages__"],
 }
 
+java_aconfig_library {
+    name: "com.android.net.flags-aconfig-java",
+    aconfig_declarations: "com.android.net.flags-aconfig",
+    defaults: ["framework-minus-apex-aconfig-java-defaults"],
+    min_sdk_version: "30",
+    apex_available: [
+        "com.android.tethering",
+    ],
+}
+
 aconfig_declarations {
     name: "com.android.net.thread.flags-aconfig",
     package: "com.android.net.thread.flags",
@@ -30,10 +40,47 @@ aconfig_declarations {
     visibility: ["//packages/modules/Connectivity:__subpackages__"],
 }
 
+java_aconfig_library {
+    name: "com.android.net.thread.flags-aconfig-java",
+    aconfig_declarations: "com.android.net.thread.flags-aconfig",
+    defaults: ["framework-minus-apex-aconfig-java-defaults"],
+    min_sdk_version: "30",
+    apex_available: [
+        "com.android.tethering",
+    ],
+}
+
 aconfig_declarations {
     name: "nearby_flags",
     package: "com.android.nearby.flags",
     container: "com.android.tethering",
     srcs: ["nearby_flags.aconfig"],
+    visibility: ["//packages/modules/Connectivity:__subpackages__"],
+}
+
+java_aconfig_library {
+    name: "com.android.nearby.flags-aconfig-java",
+    aconfig_declarations: "nearby_flags",
+    defaults: ["framework-minus-apex-aconfig-java-defaults"],
+    min_sdk_version: "30",
+    apex_available: [
+        "com.android.tethering",
+    ],
+}
+
+aconfig_declarations {
+    name: "com.android.networksecurity.flags-aconfig",
+    package: "com.android.net.ct.flags",
+    container: "com.android.tethering",
+    srcs: ["networksecurity_flags.aconfig"],
+    visibility: ["//packages/modules/Connectivity:__subpackages__"],
+}
+
+java_aconfig_library {
+    name: "networksecurity_flags_java_lib",
+    aconfig_declarations: "com.android.networksecurity.flags-aconfig",
+    min_sdk_version: "30",
+    defaults: ["framework-minus-apex-aconfig-java-defaults"],
+    apex_available: ["com.android.tethering"],
     visibility: ["//packages/modules/Connectivity:__subpackages__"],
 }

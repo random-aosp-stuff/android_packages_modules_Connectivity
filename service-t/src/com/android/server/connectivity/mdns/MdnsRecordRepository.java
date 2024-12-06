@@ -38,6 +38,7 @@ import android.util.SparseIntArray;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.net.module.util.CollectionUtils;
+import com.android.net.module.util.DnsUtils;
 import com.android.net.module.util.HexDump;
 import com.android.server.connectivity.mdns.util.MdnsUtils;
 
@@ -226,11 +227,13 @@ public class MdnsRecordRepository {
         /**
          * Create a ServiceRegistration with only update the subType.
          */
-        ServiceRegistration withSubtypes(@NonNull Set<String> newSubtypes) {
+        ServiceRegistration withSubtypes(@NonNull Set<String> newSubtypes,
+                @NonNull MdnsFeatureFlags featureFlags) {
             NsdServiceInfo newServiceInfo = new NsdServiceInfo(serviceInfo);
             newServiceInfo.setSubtypes(newSubtypes);
             return new ServiceRegistration(srvRecord.record.getServiceHost(), newServiceInfo,
-                    repliedServiceCount, sentPacketCount, exiting, isProbing, ttl);
+                    repliedServiceCount, sentPacketCount, exiting, isProbing, ttl,
+                    featureFlags);
         }
 
         /**
@@ -238,7 +241,7 @@ public class MdnsRecordRepository {
          */
         ServiceRegistration(@NonNull String[] deviceHostname, @NonNull NsdServiceInfo serviceInfo,
                 int repliedServiceCount, int sentPacketCount, boolean exiting, boolean isProbing,
-                @Nullable Duration ttl) {
+                @Nullable Duration ttl, @NonNull MdnsFeatureFlags featureFlags) {
             this.serviceInfo = serviceInfo;
 
             final long nonNameRecordsTtlMillis;
@@ -309,7 +312,8 @@ public class MdnsRecordRepository {
                                 // Service name is verified unique after probing
                                 true /* cacheFlush */,
                                 nonNameRecordsTtlMillis,
-                                attrsToTextEntries(serviceInfo.getAttributes())),
+                                attrsToTextEntries(
+                                        serviceInfo.getAttributes(), featureFlags)),
                         false /* sharedName */);
 
                 allRecords.addAll(ptrRecords);
@@ -392,9 +396,10 @@ public class MdnsRecordRepository {
          * @param serviceInfo Service to advertise
          */
         ServiceRegistration(@NonNull String[] deviceHostname, @NonNull NsdServiceInfo serviceInfo,
-                int repliedServiceCount, int sentPacketCount, @Nullable Duration ttl) {
+                int repliedServiceCount, int sentPacketCount, @Nullable Duration ttl,
+                @NonNull MdnsFeatureFlags featureFlags) {
             this(deviceHostname, serviceInfo,repliedServiceCount, sentPacketCount,
-                    false /* exiting */, true /* isProbing */, ttl);
+                    false /* exiting */, true /* isProbing */, ttl, featureFlags);
         }
 
         void setProbing(boolean probing) {
@@ -445,7 +450,7 @@ public class MdnsRecordRepository {
                     "Service ID must already exist for an update request: " + serviceId);
         }
         final ServiceRegistration updatedRegistration = existingRegistration.withSubtypes(
-                subtypes);
+                subtypes, mMdnsFeatureFlags);
         mServices.put(serviceId, updatedRegistration);
     }
 
@@ -476,7 +481,8 @@ public class MdnsRecordRepository {
 
         final ServiceRegistration registration = new ServiceRegistration(
                 mDeviceHostname, serviceInfo, NO_PACKET /* repliedServiceCount */,
-                NO_PACKET /* sentPacketCount */, ttl);
+                NO_PACKET /* sentPacketCount */, ttl,
+                mMdnsFeatureFlags);
         mServices.put(serviceId, registration);
 
         // Remove existing exiting service
@@ -494,8 +500,8 @@ public class MdnsRecordRepository {
         }
         for (int i = 0; i < mServices.size(); i++) {
             final NsdServiceInfo info = mServices.valueAt(i).serviceInfo;
-            if (MdnsUtils.equalsIgnoreDnsCase(serviceName, info.getServiceName())
-                    && MdnsUtils.equalsIgnoreDnsCase(serviceType, info.getServiceType())) {
+            if (DnsUtils.equalsIgnoreDnsCase(serviceName, info.getServiceName())
+                    && DnsUtils.equalsIgnoreDnsCase(serviceType, info.getServiceType())) {
                 return mServices.keyAt(i);
             }
         }
@@ -547,8 +553,17 @@ public class MdnsRecordRepository {
         return new MdnsProber.ProbingInfo(serviceId, probingRecords);
     }
 
-    private static List<MdnsServiceInfo.TextEntry> attrsToTextEntries(Map<String, byte[]> attrs) {
-        final List<MdnsServiceInfo.TextEntry> out = new ArrayList<>(attrs.size());
+    private static List<MdnsServiceInfo.TextEntry> attrsToTextEntries(
+            @NonNull Map<String, byte[]> attrs, @NonNull MdnsFeatureFlags featureFlags) {
+        final List<MdnsServiceInfo.TextEntry> out = new ArrayList<>(
+                attrs.size() == 0 ? 1 : attrs.size());
+        if (featureFlags.avoidAdvertisingEmptyTxtRecords() && attrs.size() == 0) {
+            // As per RFC6763 6.1, empty TXT records are not allowed, but records containing a
+            // single empty String must be treated as equivalent.
+            out.add(new MdnsServiceInfo.TextEntry("", MdnsServiceInfo.TextEntry.VALUE_NONE));
+            return out;
+        }
+
         for (Map.Entry<String, byte[]> attr : attrs.entrySet()) {
             out.add(new MdnsServiceInfo.TextEntry(attr.getKey(), attr.getValue()));
         }
@@ -821,7 +836,7 @@ public class MdnsRecordRepository {
              must match the question qtype unless the qtype is "ANY" (255) or the rrtype is
              "CNAME" (5), and the record rrclass must match the question qclass unless the
              qclass is "ANY" (255) */
-            if (!MdnsUtils.equalsDnsLabelIgnoreDnsCase(info.record.getName(), question.getName())) {
+            if (!DnsUtils.equalsDnsLabelIgnoreDnsCase(info.record.getName(), question.getName())) {
                 continue;
             }
             hasFullyOwnedNameMatch |= !info.isSharedName;
@@ -1232,7 +1247,7 @@ public class MdnsRecordRepository {
             return RecordConflictType.NO_CONFLICT;
         }
 
-        if (!MdnsUtils.equalsDnsLabelIgnoreDnsCase(record.getName(), fullServiceName)) {
+        if (!DnsUtils.equalsDnsLabelIgnoreDnsCase(record.getName(), fullServiceName)) {
             return RecordConflictType.NO_CONFLICT;
         }
 
@@ -1270,7 +1285,7 @@ public class MdnsRecordRepository {
         }
 
         // Different names. There won't be a conflict.
-        if (!MdnsUtils.equalsIgnoreDnsCase(
+        if (!DnsUtils.equalsIgnoreDnsCase(
                 record.getName()[0], registration.serviceInfo.getHostname())) {
             return RecordConflictType.NO_CONFLICT;
         }
@@ -1351,7 +1366,7 @@ public class MdnsRecordRepository {
             int id = mServices.keyAt(i);
             ServiceRegistration service = mServices.valueAt(i);
             if (service.exiting) continue;
-            if (MdnsUtils.equalsIgnoreDnsCase(service.serviceInfo.getHostname(), hostname)) {
+            if (DnsUtils.equalsIgnoreDnsCase(service.serviceInfo.getHostname(), hostname)) {
                 consumer.accept(id, service);
             }
         }
@@ -1402,7 +1417,8 @@ public class MdnsRecordRepository {
         if (existing == null) return null;
 
         final ServiceRegistration newService = new ServiceRegistration(mDeviceHostname, newInfo,
-                existing.repliedServiceCount, existing.sentPacketCount, existing.ttl);
+                existing.repliedServiceCount, existing.sentPacketCount, existing.ttl,
+                mMdnsFeatureFlags);
         mServices.put(serviceId, newService);
         return makeProbingInfo(serviceId, newService);
     }

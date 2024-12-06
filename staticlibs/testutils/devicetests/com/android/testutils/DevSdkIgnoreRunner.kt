@@ -16,6 +16,8 @@
 
 package com.android.testutils
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.android.net.module.util.LinkPropertiesUtils.CompareOrUpdateResult
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter
@@ -57,6 +59,12 @@ import org.mockito.Mockito
 class DevSdkIgnoreRunner(private val klass: Class<*>) : Runner(), Filterable, Sortable {
     private val leakMonitorDesc = Description.createTestDescription(klass, "ThreadLeakMonitor")
     private val shouldThreadLeakFailTest = klass.isAnnotationPresent(MonitorThreadLeak::class.java)
+    private val restoreDefaultNetworkDesc =
+            Description.createTestDescription(klass, "RestoreDefaultNetwork")
+    val ctx = ApplicationProvider.getApplicationContext<Context>()
+    private val restoreDefaultNetwork =
+            klass.isAnnotationPresent(RestoreDefaultNetwork::class.java) &&
+            !ctx.applicationInfo.isInstantApp()
 
     // Inference correctly infers Runner & Filterable & Sortable for |baseRunner|, but the
     // Java bytecode doesn't have a way to express this. Give this type a name by wrapping it.
@@ -70,6 +78,10 @@ class DevSdkIgnoreRunner(private val klass: Class<*>) : Runner(), Filterable, So
     // Annotation for test classes to indicate the test runner should monitor thread leak.
     // TODO(b/307693729): Remove this annotation and monitor thread leak by default.
     annotation class MonitorThreadLeak
+
+    // Annotation for test classes to indicate the test runner should verify the default network is
+    // restored after each test.
+    annotation class RestoreDefaultNetwork
 
     private val baseRunner: RunnerWrapper<*>? = klass.let {
         val ignoreAfter = it.getAnnotation(IgnoreAfter::class.java)
@@ -90,25 +102,10 @@ class DevSdkIgnoreRunner(private val klass: Class<*>) : Runner(), Filterable, So
         Modifier.isStatic(it.modifiers) &&
                 it.isAnnotationPresent(Parameterized.Parameters::class.java) }
 
-    override fun run(notifier: RunNotifier) {
-        if (baseRunner == null) {
-            // Report a single, skipped placeholder test for this class, as the class is expected to
-            // report results when run. In practice runners that apply the Filterable implementation
-            // would see a NoTestsRemainException and not call the run method.
-            notifier.fireTestIgnored(
-                    Description.createTestDescription(klass, "skippedClassForDevSdkMismatch"))
-            return
-        }
-        if (!shouldThreadLeakFailTest) {
-            baseRunner.run(notifier)
-            return
-        }
-
-        // Dump threads as a baseline to monitor thread leaks.
-        val threadCountsBeforeTest = getAllThreadNameCounts()
-
-        baseRunner.run(notifier)
-
+    private fun checkThreadLeak(
+            notifier: RunNotifier,
+            threadCountsBeforeTest: Map<String, Int>
+    ) {
         notifier.fireTestStarted(leakMonitorDesc)
         val threadCountsAfterTest = getAllThreadNameCounts()
         // TODO : move CompareOrUpdateResult to its own util instead of LinkProperties.
@@ -122,13 +119,48 @@ class DevSdkIgnoreRunner(private val klass: Class<*>) : Runner(), Filterable, So
         val increasedThreads = threadsDiff.updated
                 .filter { threadCountsBeforeTest[it.key]!! < it.value }
         if (threadsDiff.added.isNotEmpty() || increasedThreads.isNotEmpty()) {
-            notifier.fireTestFailure(Failure(leakMonitorDesc,
-                    IllegalStateException("Unexpected thread changes: $threadsDiff")))
+            notifier.fireTestFailure(Failure(
+                    leakMonitorDesc,
+                    IllegalStateException("Unexpected thread changes: $threadsDiff")
+            ))
         }
+        notifier.fireTestFinished(leakMonitorDesc)
+    }
+
+    override fun run(notifier: RunNotifier) {
+        if (baseRunner == null) {
+            // Report a single, skipped placeholder test for this class, as the class is expected to
+            // report results when run. In practice runners that apply the Filterable implementation
+            // would see a NoTestsRemainException and not call the run method.
+            notifier.fireTestIgnored(
+                    Description.createTestDescription(klass, "skippedClassForDevSdkMismatch")
+            )
+            return
+        }
+
+        val networkRestoreMonitor = if (restoreDefaultNetwork) {
+            DefaultNetworkRestoreMonitor(ctx, notifier).apply{
+                init(ConnectUtil(ctx))
+            }
+        } else {
+            null
+        }
+        val threadCountsBeforeTest = if (shouldThreadLeakFailTest) {
+            // Dump threads as a baseline to monitor thread leaks.
+            getAllThreadNameCounts()
+        } else {
+            null
+        }
+
+        baseRunner.run(notifier)
+
+        if (threadCountsBeforeTest != null) {
+            checkThreadLeak(notifier, threadCountsBeforeTest)
+        }
+        networkRestoreMonitor?.reportResultAndCleanUp(restoreDefaultNetworkDesc)
         // Clears up internal state of all inline mocks.
         // TODO: Call clearInlineMocks() at the end of each test.
         Mockito.framework().clearInlineMocks()
-        notifier.fireTestFinished(leakMonitorDesc)
     }
 
     private fun getAllThreadNameCounts(): Map<String, Int> {
@@ -152,6 +184,9 @@ class DevSdkIgnoreRunner(private val klass: Class<*>) : Runner(), Filterable, So
             if (shouldThreadLeakFailTest) {
                 it.addChild(leakMonitorDesc)
             }
+            if (restoreDefaultNetwork) {
+                it.addChild(restoreDefaultNetworkDesc)
+            }
         }
     }
 
@@ -162,7 +197,14 @@ class DevSdkIgnoreRunner(private val klass: Class<*>) : Runner(), Filterable, So
         // When ignoring the tests, a skipped placeholder test is reported, so test count is 1.
         if (baseRunner == null) return 1
 
-        return baseRunner.testCount() + if (shouldThreadLeakFailTest) 1 else 0
+        var testCount = baseRunner.testCount()
+        if (shouldThreadLeakFailTest) {
+            testCount += 1
+        }
+        if (restoreDefaultNetwork) {
+            testCount += 1
+        }
+        return testCount
     }
 
     @Throws(NoTestsRemainException::class)

@@ -16,6 +16,12 @@
 
 package com.android.server.thread;
 
+import static android.Manifest.permission.NETWORK_SETTINGS;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN;
+import static android.net.NetworkCapabilities.TRANSPORT_ETHERNET;
+import static android.net.NetworkCapabilities.TRANSPORT_THREAD;
+import static android.net.NetworkCapabilities.TRANSPORT_WIFI;
 import static android.net.thread.ActiveOperationalDataset.CHANNEL_PAGE_24_GHZ;
 import static android.net.thread.ThreadNetworkController.STATE_DISABLED;
 import static android.net.thread.ThreadNetworkController.STATE_ENABLED;
@@ -24,9 +30,9 @@ import static android.net.thread.ThreadNetworkException.ERROR_INTERNAL_ERROR;
 import static android.net.thread.ThreadNetworkException.ERROR_THREAD_DISABLED;
 import static android.net.thread.ThreadNetworkManager.DISALLOW_THREAD_NETWORK;
 import static android.net.thread.ThreadNetworkManager.PERMISSION_THREAD_NETWORK_PRIVILEGED;
+import static android.net.thread.ThreadNetworkManager.PERMISSION_THREAD_NETWORK_TESTING;
 
 import static com.android.server.thread.ThreadNetworkCountryCode.DEFAULT_COUNTRY_CODE;
-import static com.android.server.thread.ThreadPersistentSettings.THREAD_ENABLED_IN_AIRPLANE_MODE;
 import static com.android.server.thread.openthread.IOtDaemon.ErrorCode.OT_ERROR_INVALID_STATE;
 
 import static com.google.common.io.BaseEncoding.base16;
@@ -39,6 +45,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
@@ -49,16 +57,23 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
 import android.net.NetworkAgent;
 import android.net.NetworkProvider;
+import android.net.NetworkRequest;
 import android.net.thread.ActiveOperationalDataset;
 import android.net.thread.IActiveOperationalDatasetReceiver;
 import android.net.thread.IOperationReceiver;
+import android.net.thread.IOutputReceiver;
+import android.net.thread.ThreadConfiguration;
 import android.net.thread.ThreadNetworkException;
 import android.os.Handler;
 import android.os.IBinder;
@@ -67,7 +82,6 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.UserManager;
 import android.os.test.TestLooper;
-import android.provider.Settings;
 import android.util.AtomicFile;
 
 import androidx.test.annotation.UiThreadTest;
@@ -95,9 +109,12 @@ import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 import org.mockito.MockitoSession;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.DateTimeException;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -147,7 +164,6 @@ public final class ThreadNetworkControllerServiceTest {
     private static final byte[] TEST_VENDOR_OUI_BYTES = new byte[] {(byte) 0xAC, (byte) 0xDE, 0x48};
     private static final String TEST_VENDOR_NAME = "test vendor";
     private static final String TEST_MODEL_NAME = "test model";
-    private static final boolean TEST_VGH_VALUE = false;
 
     @Mock private ConnectivityManager mMockConnectivityManager;
     @Mock private NetworkAgent mMockNetworkAgent;
@@ -159,6 +175,7 @@ public final class ThreadNetworkControllerServiceTest {
     @Mock private IBinder mIBinder;
     @Mock Resources mResources;
     @Mock ConnectivityResources mConnectivityResources;
+    @Mock Map<Network, LinkProperties> mMockNetworkToLinkProperties;
 
     private Context mContext;
     private TestLooper mTestLooper;
@@ -179,6 +196,12 @@ public final class ThreadNetworkControllerServiceTest {
                 .when(mContext)
                 .enforceCallingOrSelfPermission(
                         eq(PERMISSION_THREAD_NETWORK_PRIVILEGED), anyString());
+        doNothing()
+                .when(mContext)
+                .enforceCallingOrSelfPermission(eq(PERMISSION_THREAD_NETWORK_TESTING), anyString());
+        doNothing()
+                .when(mContext)
+                .enforceCallingOrSelfPermission(eq(NETWORK_SETTINGS), anyString());
 
         mTestLooper = new TestLooper();
         final Handler handler = new Handler(mTestLooper.getLooper());
@@ -190,8 +213,6 @@ public final class ThreadNetworkControllerServiceTest {
 
         when(mMockUserManager.hasUserRestriction(eq(DISALLOW_THREAD_NETWORK))).thenReturn(false);
 
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 0);
-
         when(mConnectivityResources.get()).thenReturn(mResources);
         when(mResources.getBoolean(eq(R.bool.config_thread_default_enabled))).thenReturn(true);
         when(mResources.getString(eq(R.string.config_thread_vendor_name)))
@@ -200,8 +221,8 @@ public final class ThreadNetworkControllerServiceTest {
                 .thenReturn(TEST_VENDOR_OUI);
         when(mResources.getString(eq(R.string.config_thread_model_name)))
                 .thenReturn(TEST_MODEL_NAME);
-        when(mResources.getBoolean(eq(R.bool.config_thread_managed_by_google_home)))
-                .thenReturn(TEST_VGH_VALUE);
+        when(mResources.getStringArray(eq(R.array.config_thread_mdns_vendor_specific_txts)))
+                .thenReturn(new String[] {});
 
         final AtomicFile storageFile = new AtomicFile(tempFolder.newFile("thread_settings.xml"));
         mPersistentSettings = new ThreadPersistentSettings(storageFile, mConnectivityResources);
@@ -220,7 +241,8 @@ public final class ThreadNetworkControllerServiceTest {
                         mMockNsdPublisher,
                         mMockUserManager,
                         mConnectivityResources,
-                        () -> DEFAULT_COUNTRY_CODE);
+                        () -> DEFAULT_COUNTRY_CODE,
+                        mMockNetworkToLinkProperties);
         mService.setTestNetworkAgent(mMockNetworkAgent);
     }
 
@@ -244,8 +266,8 @@ public final class ThreadNetworkControllerServiceTest {
                 .thenReturn(TEST_VENDOR_OUI);
         when(mResources.getString(eq(R.string.config_thread_model_name)))
                 .thenReturn(TEST_MODEL_NAME);
-        when(mResources.getBoolean(eq(R.bool.config_thread_managed_by_google_home)))
-                .thenReturn(true);
+        when(mResources.getStringArray(eq(R.array.config_thread_mdns_vendor_specific_txts)))
+                .thenReturn(new String[] {"vt=test"});
 
         mService.initialize();
         mTestLooper.dispatchAll();
@@ -255,19 +277,7 @@ public final class ThreadNetworkControllerServiceTest {
         assertThat(meshcopTxts.vendorOui).isEqualTo(TEST_VENDOR_OUI_BYTES);
         assertThat(meshcopTxts.modelName).isEqualTo(TEST_MODEL_NAME);
         assertThat(meshcopTxts.nonStandardTxtEntries)
-                .containsExactly(new DnsTxtAttribute("vgh", "1".getBytes(StandardCharsets.UTF_8)));
-    }
-
-    @Test
-    public void getMeshcopTxtAttributes_managedByGoogleIsFalse_vghIsZero() {
-        when(mResources.getBoolean(eq(R.bool.config_thread_managed_by_google_home)))
-                .thenReturn(false);
-
-        MeshcopTxtAttributes meshcopTxts =
-                ThreadNetworkControllerService.getMeshcopTxtAttributes(mResources);
-
-        assertThat(meshcopTxts.nonStandardTxtEntries)
-                .containsExactly(new DnsTxtAttribute("vgh", "0".getBytes(StandardCharsets.UTF_8)));
+                .containsExactly(new DnsTxtAttribute("vt", "test".getBytes(UTF_8)));
     }
 
     @Test
@@ -337,6 +347,61 @@ public final class ThreadNetworkControllerServiceTest {
     private byte[] getMeshcopTxtAttributesWithVendorOui(String vendorOui) {
         when(mResources.getString(eq(R.string.config_thread_vendor_oui))).thenReturn(vendorOui);
         return ThreadNetworkControllerService.getMeshcopTxtAttributes(mResources).vendorOui;
+    }
+
+    @Test
+    public void makeVendorSpecificTxtAttrs_validTxts_returnsParsedTxtAttrs() {
+        String[] txts = new String[] {"va=123", "vb=", "vc"};
+
+        List<DnsTxtAttribute> attrs = mService.makeVendorSpecificTxtAttrs(txts);
+
+        assertThat(attrs)
+                .containsExactly(
+                        new DnsTxtAttribute("va", "123".getBytes(UTF_8)),
+                        new DnsTxtAttribute("vb", new byte[] {}),
+                        new DnsTxtAttribute("vc", new byte[] {}));
+    }
+
+    @Test
+    public void makeVendorSpecificTxtAttrs_txtKeyNotStartWithV_throwsIllegalArgument() {
+        String[] txts = new String[] {"abc=123"};
+
+        assertThrows(
+                IllegalArgumentException.class, () -> mService.makeVendorSpecificTxtAttrs(txts));
+    }
+
+    @Test
+    public void makeVendorSpecificTxtAttrs_txtIsTooShort_throwsIllegalArgument() {
+        String[] txtEmptyKey = new String[] {"=123"};
+        String[] txtSingleCharKey = new String[] {"v=456"};
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> mService.makeVendorSpecificTxtAttrs(txtEmptyKey));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> mService.makeVendorSpecificTxtAttrs(txtSingleCharKey));
+    }
+
+    @Test
+    public void makeVendorSpecificTxtAttrs_txtValueIsEmpty_parseSuccess() {
+        String[] txts = new String[] {"va=", "vb"};
+
+        List<DnsTxtAttribute> attrs = mService.makeVendorSpecificTxtAttrs(txts);
+
+        assertThat(attrs)
+                .containsExactly(
+                        new DnsTxtAttribute("va", new byte[] {}),
+                        new DnsTxtAttribute("vb", new byte[] {}));
+    }
+
+    @Test
+    public void makeVendorSpecificTxtAttrs_multipleEquals_splittedByTheFirstEqual() {
+        String[] txts = new String[] {"va=abc=def=123"};
+
+        List<DnsTxtAttribute> attrs = mService.makeVendorSpecificTxtAttrs(txts);
+
+        assertThat(attrs).containsExactly(new DnsTxtAttribute("va", "abc=def=123".getBytes(UTF_8)));
     }
 
     @Test
@@ -434,100 +499,6 @@ public final class ThreadNetworkControllerServiceTest {
         assertThat(failure.getErrorCode()).isEqualTo(ERROR_FAILED_PRECONDITION);
     }
 
-    @Test
-    public void airplaneMode_initWithAirplaneModeOn_otDaemonNotStarted() {
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 1);
-
-        mService.initialize();
-        mTestLooper.dispatchAll();
-
-        assertThat(mFakeOtDaemon.isInitialized()).isFalse();
-    }
-
-    @Test
-    public void airplaneMode_initWithAirplaneModeOff_threadIsEnabled() {
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 0);
-
-        mService.initialize();
-        mTestLooper.dispatchAll();
-
-        assertThat(mFakeOtDaemon.getEnabledState()).isEqualTo(STATE_ENABLED);
-    }
-
-    @Test
-    public void airplaneMode_changesFromOffToOn_stateIsDisabled() {
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 0);
-        AtomicReference<BroadcastReceiver> receiverRef =
-                captureBroadcastReceiver(Intent.ACTION_AIRPLANE_MODE_CHANGED);
-        mService.initialize();
-        mTestLooper.dispatchAll();
-
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 1);
-        receiverRef.get().onReceive(mContext, new Intent());
-        mTestLooper.dispatchAll();
-
-        assertThat(mFakeOtDaemon.getEnabledState()).isEqualTo(STATE_DISABLED);
-    }
-
-    @Test
-    public void airplaneMode_changesFromOnToOff_stateIsEnabled() {
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 1);
-        AtomicReference<BroadcastReceiver> receiverRef =
-                captureBroadcastReceiver(Intent.ACTION_AIRPLANE_MODE_CHANGED);
-        mService.initialize();
-        mTestLooper.dispatchAll();
-
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 0);
-        receiverRef.get().onReceive(mContext, new Intent());
-        mTestLooper.dispatchAll();
-
-        assertThat(mFakeOtDaemon.getEnabledState()).isEqualTo(STATE_ENABLED);
-    }
-
-    @Test
-    public void airplaneMode_setEnabledWhenAirplaneModeIsOn_WillNotAutoDisableSecondTime() {
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 1);
-        AtomicReference<BroadcastReceiver> receiverRef =
-                captureBroadcastReceiver(Intent.ACTION_AIRPLANE_MODE_CHANGED);
-        CompletableFuture<Void> setEnabledFuture = new CompletableFuture<>();
-        mService.initialize();
-
-        mService.setEnabled(true, newOperationReceiver(setEnabledFuture));
-        mTestLooper.dispatchAll();
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 0);
-        receiverRef.get().onReceive(mContext, new Intent());
-        mTestLooper.dispatchAll();
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 1);
-        receiverRef.get().onReceive(mContext, new Intent());
-        mTestLooper.dispatchAll();
-
-        assertThat(mFakeOtDaemon.getEnabledState()).isEqualTo(STATE_ENABLED);
-        assertThat(mPersistentSettings.get(THREAD_ENABLED_IN_AIRPLANE_MODE)).isTrue();
-    }
-
-    @Test
-    public void airplaneMode_setDisabledWhenAirplaneModeIsOn_WillAutoDisableSecondTime() {
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 1);
-        AtomicReference<BroadcastReceiver> receiverRef =
-                captureBroadcastReceiver(Intent.ACTION_AIRPLANE_MODE_CHANGED);
-        CompletableFuture<Void> setEnabledFuture = new CompletableFuture<>();
-        mService.initialize();
-        mService.setEnabled(true, newOperationReceiver(setEnabledFuture));
-        mTestLooper.dispatchAll();
-
-        mService.setEnabled(false, newOperationReceiver(setEnabledFuture));
-        mTestLooper.dispatchAll();
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 0);
-        receiverRef.get().onReceive(mContext, new Intent());
-        mTestLooper.dispatchAll();
-        Settings.Global.putInt(mContext.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 1);
-        receiverRef.get().onReceive(mContext, new Intent());
-        mTestLooper.dispatchAll();
-
-        assertThat(mFakeOtDaemon.getEnabledState()).isEqualTo(STATE_DISABLED);
-        assertThat(mPersistentSettings.get(THREAD_ENABLED_IN_AIRPLANE_MODE)).isFalse();
-    }
-
     private AtomicReference<BroadcastReceiver> captureBroadcastReceiver(String action) {
         AtomicReference<BroadcastReceiver> receiverRef = new AtomicReference<>();
 
@@ -582,6 +553,55 @@ public final class ThreadNetworkControllerServiceTest {
         verify(mockReceiver, times(1)).onSuccess(mActiveDatasetCaptor.capture());
         ActiveOperationalDataset activeDataset = mActiveDatasetCaptor.getValue();
         assertThat(activeDataset.getActiveTimestamp().isAuthoritativeSource()).isFalse();
+    }
+
+    @Test
+    public void createRandomizedDataset_zeroNanoseconds_returnsZeroTicks() throws Exception {
+        Instant now = Instant.ofEpochSecond(0, 0);
+        Clock clock = Clock.fixed(now, ZoneId.systemDefault());
+        MockitoSession session =
+                ExtendedMockito.mockitoSession().mockStatic(SystemClock.class).startMocking();
+        final IActiveOperationalDatasetReceiver mockReceiver =
+                ExtendedMockito.mock(IActiveOperationalDatasetReceiver.class);
+
+        try {
+            ExtendedMockito.when(SystemClock.currentNetworkTimeClock()).thenReturn(clock);
+            mService.createRandomizedDataset(DEFAULT_NETWORK_NAME, mockReceiver);
+            mTestLooper.dispatchAll();
+        } finally {
+            session.finishMocking();
+        }
+
+        verify(mockReceiver, never()).onError(anyInt(), anyString());
+        verify(mockReceiver, times(1)).onSuccess(mActiveDatasetCaptor.capture());
+        ActiveOperationalDataset activeDataset = mActiveDatasetCaptor.getValue();
+        assertThat(activeDataset.getActiveTimestamp().getTicks()).isEqualTo(0);
+    }
+
+    @Test
+    public void createRandomizedDataset_maxNanoseconds_returnsMaxTicks() throws Exception {
+        // The nanoseconds to ticks conversion is rounded in the current implementation.
+        // 32767.5 / 32768 * 1000000000 = 999984741.2109375, using 999984741 to
+        // produce the maximum ticks.
+        Instant now = Instant.ofEpochSecond(0, 999984741);
+        Clock clock = Clock.fixed(now, ZoneId.systemDefault());
+        MockitoSession session =
+                ExtendedMockito.mockitoSession().mockStatic(SystemClock.class).startMocking();
+        final IActiveOperationalDatasetReceiver mockReceiver =
+                ExtendedMockito.mock(IActiveOperationalDatasetReceiver.class);
+
+        try {
+            ExtendedMockito.when(SystemClock.currentNetworkTimeClock()).thenReturn(clock);
+            mService.createRandomizedDataset(DEFAULT_NETWORK_NAME, mockReceiver);
+            mTestLooper.dispatchAll();
+        } finally {
+            session.finishMocking();
+        }
+
+        verify(mockReceiver, never()).onError(anyInt(), anyString());
+        verify(mockReceiver, times(1)).onSuccess(mActiveDatasetCaptor.capture());
+        ActiveOperationalDataset activeDataset = mActiveDatasetCaptor.getValue();
+        assertThat(activeDataset.getActiveTimestamp().getTicks()).isEqualTo(32767);
     }
 
     @Test
@@ -707,5 +727,115 @@ public final class ThreadNetworkControllerServiceTest {
         InOrder inOrder = Mockito.inOrder(mMockTunIfController);
         inOrder.verify(mMockTunIfController, times(1)).setInterfaceUp(false);
         inOrder.verify(mMockTunIfController, times(1)).setInterfaceUp(true);
+    }
+
+    @Test
+    public void setConfiguration_configurationUpdated() throws Exception {
+        mService.initialize();
+        final IOperationReceiver mockReceiver1 = mock(IOperationReceiver.class);
+        final IOperationReceiver mockReceiver2 = mock(IOperationReceiver.class);
+        final IOperationReceiver mockReceiver3 = mock(IOperationReceiver.class);
+        ThreadConfiguration config1 =
+                new ThreadConfiguration.Builder()
+                        .setNat64Enabled(false)
+                        .setDhcpv6PdEnabled(false)
+                        .build();
+        ThreadConfiguration config2 =
+                new ThreadConfiguration.Builder()
+                        .setNat64Enabled(true)
+                        .setDhcpv6PdEnabled(true)
+                        .build();
+        ThreadConfiguration config3 =
+                new ThreadConfiguration.Builder(config2).build(); // Same as config2
+
+        mService.setConfiguration(config1, mockReceiver1);
+        mService.setConfiguration(config2, mockReceiver2);
+        mService.setConfiguration(config3, mockReceiver3);
+        mTestLooper.dispatchAll();
+
+        assertThat(mPersistentSettings.getConfiguration()).isEqualTo(config3);
+        InOrder inOrder = Mockito.inOrder(mockReceiver1, mockReceiver2, mockReceiver3);
+        inOrder.verify(mockReceiver1).onSuccess();
+        inOrder.verify(mockReceiver2).onSuccess();
+        inOrder.verify(mockReceiver3).onSuccess();
+    }
+
+    @Test
+    public void initialize_upstreamNetworkRequestHasCertainTransportTypesAndCapabilities() {
+        mService.initialize();
+        mTestLooper.dispatchAll();
+
+        ArgumentCaptor<NetworkRequest> networkRequestCaptor =
+                ArgumentCaptor.forClass(NetworkRequest.class);
+        verify(mMockConnectivityManager, atLeastOnce())
+                .registerNetworkCallback(
+                        networkRequestCaptor.capture(),
+                        any(ConnectivityManager.NetworkCallback.class),
+                        any(Handler.class));
+        List<NetworkRequest> upstreamNetworkRequests =
+                networkRequestCaptor.getAllValues().stream()
+                        .filter(nr -> !nr.hasTransport(TRANSPORT_THREAD))
+                        .toList();
+        assertThat(upstreamNetworkRequests.size()).isEqualTo(1);
+        NetworkRequest upstreamNetworkRequest = upstreamNetworkRequests.get(0);
+        assertThat(upstreamNetworkRequest.hasTransport(TRANSPORT_WIFI)).isTrue();
+        assertThat(upstreamNetworkRequest.hasTransport(TRANSPORT_ETHERNET)).isTrue();
+        assertThat(upstreamNetworkRequest.hasCapability(NET_CAPABILITY_NOT_VPN)).isTrue();
+        assertThat(upstreamNetworkRequest.hasCapability(NET_CAPABILITY_INTERNET)).isTrue();
+    }
+
+    @Test
+    public void setTestNetworkAsUpstream_upstreamNetworkRequestAlwaysDisallowsVpn() {
+        mService.initialize();
+        mTestLooper.dispatchAll();
+        clearInvocations(mMockConnectivityManager);
+
+        final IOperationReceiver mockReceiver1 = mock(IOperationReceiver.class);
+        final IOperationReceiver mockReceiver2 = mock(IOperationReceiver.class);
+        mService.setTestNetworkAsUpstream("test-network", mockReceiver1);
+        mService.setTestNetworkAsUpstream(null, mockReceiver2);
+        mTestLooper.dispatchAll();
+
+        ArgumentCaptor<NetworkRequest> networkRequestCaptor =
+                ArgumentCaptor.forClass(NetworkRequest.class);
+        verify(mMockConnectivityManager, times(2))
+                .registerNetworkCallback(
+                        networkRequestCaptor.capture(),
+                        any(ConnectivityManager.NetworkCallback.class),
+                        any(Handler.class));
+        assertThat(networkRequestCaptor.getAllValues().size()).isEqualTo(2);
+        NetworkRequest networkRequest1 = networkRequestCaptor.getAllValues().get(0);
+        NetworkRequest networkRequest2 = networkRequestCaptor.getAllValues().get(1);
+        assertThat(networkRequest1.getNetworkSpecifier()).isNotNull();
+        assertThat(networkRequest1.hasCapability(NET_CAPABILITY_NOT_VPN)).isTrue();
+        assertThat(networkRequest2.getNetworkSpecifier()).isNull();
+        assertThat(networkRequest2.hasCapability(NET_CAPABILITY_NOT_VPN)).isTrue();
+    }
+
+    @Test
+    public void runOtCtlCommand_noPermission_throwsSecurityException() {
+        doThrow(new SecurityException(""))
+                .when(mContext)
+                .enforceCallingOrSelfPermission(eq(PERMISSION_THREAD_NETWORK_PRIVILEGED), any());
+        doThrow(new SecurityException(""))
+                .when(mContext)
+                .enforceCallingOrSelfPermission(eq(PERMISSION_THREAD_NETWORK_TESTING), any());
+
+        assertThrows(
+                SecurityException.class,
+                () -> mService.runOtCtlCommand("", false, new IOutputReceiver.Default()));
+    }
+
+    @Test
+    public void runOtCtlCommand_otDaemonRemoteFailure_receiverOnErrorIsCalled() throws Exception {
+        mService.initialize();
+        final IOutputReceiver mockReceiver = mock(IOutputReceiver.class);
+        mFakeOtDaemon.setRunOtCtlCommandException(
+                new RemoteException("ot-daemon runOtCtlCommand() throws"));
+
+        mService.runOtCtlCommand("ot-ctl state", false, mockReceiver);
+        mTestLooper.dispatchAll();
+
+        verify(mockReceiver, times(1)).onError(eq(ERROR_INTERNAL_ERROR), anyString());
     }
 }

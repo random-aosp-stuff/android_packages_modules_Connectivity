@@ -26,6 +26,7 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
 import android.annotation.Size;
+import android.annotation.SuppressLint;
 import android.annotation.SystemApi;
 import android.os.Binder;
 import android.os.OutcomeReceiver;
@@ -34,6 +35,7 @@ import android.util.SparseIntArray;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.net.thread.flags.Flags;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -41,6 +43,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 
 /**
  * Provides the primary APIs for controlling all aspects of a Thread network.
@@ -50,7 +53,7 @@ import java.util.concurrent.Executor;
  *
  * @hide
  */
-@FlaggedApi(ThreadNetworkFlags.FLAG_THREAD_ENABLED)
+@FlaggedApi(Flags.FLAG_THREAD_ENABLED)
 @SystemApi
 public final class ThreadNetworkController {
     private static final String TAG = "ThreadNetworkController";
@@ -100,11 +103,12 @@ public final class ThreadNetworkController {
     /** Thread standard version 1.3. */
     public static final int THREAD_VERSION_1_3 = 4;
 
-    /** Minimum value of max power in unit of 0.01dBm. @hide */
-    private static final int POWER_LIMITATION_MIN = -32768;
-
-    /** Maximum value of max power in unit of 0.01dBm. @hide */
-    private static final int POWER_LIMITATION_MAX = 32767;
+    /** The value of max power to disable the Thread channel. */
+    // This constant can never change. It has "max" in the name not because it indicates
+    // maximum power, but because it's passed to an API that sets the maximum power to
+    // disabled the Thread channel.
+    @SuppressLint("MinMaxConstant")
+    public static final int MAX_POWER_CHANNEL_DISABLED = Integer.MIN_VALUE;
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -123,6 +127,12 @@ public final class ThreadNetworkController {
     @GuardedBy("mOpDatasetCallbackMapLock")
     private final Map<OperationalDatasetCallback, OperationalDatasetCallbackProxy>
             mOpDatasetCallbackMap = new HashMap<>();
+
+    private final Object mConfigurationCallbackMapLock = new Object();
+
+    @GuardedBy("mConfigurationCallbackMapLock")
+    private final Map<Consumer<ThreadConfiguration>, ConfigurationCallbackProxy>
+            mConfigurationCallbackMap = new HashMap<>();
 
     /** @hide */
     public ThreadNetworkController(@NonNull IThreadNetworkController controllerService) {
@@ -579,6 +589,95 @@ public final class ThreadNetworkController {
     }
 
     /**
+     * Configures the Thread features for this device.
+     *
+     * <p>This method sets the {@link ThreadConfiguration} for this device. On success, the {@link
+     * OutcomeReceiver#onResult} will be called, and the {@code configuration} will be applied and
+     * persisted to the device; the configuration changes can be observed by {@link
+     * #registerConfigurationCallback}. On failure, {@link OutcomeReceiver#onError} of {@code
+     * receiver} will be invoked with a specific error.
+     *
+     * @param configuration the configuration to set
+     * @param executor the executor to execute {@code receiver}
+     * @param receiver the receiver to receive result of this operation
+     * @hide
+     */
+    // @FlaggedApi(ThreadNetworkFlags.FLAG_CONFIGURATION_ENABLED)
+    // @RequiresPermission(permission.THREAD_NETWORK_PRIVILEGED)
+    public void setConfiguration(
+            @NonNull ThreadConfiguration configuration,
+            @NonNull @CallbackExecutor Executor executor,
+            @NonNull OutcomeReceiver<Void, ThreadNetworkException> receiver) {
+        requireNonNull(configuration, "Configuration cannot be null");
+        requireNonNull(executor, "executor cannot be null");
+        requireNonNull(receiver, "receiver cannot be null");
+        try {
+            mControllerService.setConfiguration(
+                    configuration, new OperationReceiverProxy(executor, receiver));
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Registers a callback to be called when the configuration is changed.
+     *
+     * <p>Upon return of this method, {@code callback} will be invoked immediately with the current
+     * {@link ThreadConfiguration}.
+     *
+     * @param executor the executor to execute the {@code callback}
+     * @param callback the callback to receive Thread configuration changes
+     * @throws IllegalArgumentException if {@code callback} has already been registered
+     */
+    @FlaggedApi(Flags.FLAG_CONFIGURATION_ENABLED)
+    @RequiresPermission(permission.THREAD_NETWORK_PRIVILEGED)
+    public void registerConfigurationCallback(
+            @NonNull @CallbackExecutor Executor executor,
+            @NonNull Consumer<ThreadConfiguration> callback) {
+        requireNonNull(executor, "executor cannot be null");
+        requireNonNull(callback, "callback cannot be null");
+        synchronized (mConfigurationCallbackMapLock) {
+            if (mConfigurationCallbackMap.containsKey(callback)) {
+                throw new IllegalArgumentException("callback has already been registered");
+            }
+            ConfigurationCallbackProxy callbackProxy =
+                    new ConfigurationCallbackProxy(executor, callback);
+            mConfigurationCallbackMap.put(callback, callbackProxy);
+            try {
+                mControllerService.registerConfigurationCallback(callbackProxy);
+            } catch (RemoteException e) {
+                mConfigurationCallbackMap.remove(callback);
+                e.rethrowFromSystemServer();
+            }
+        }
+    }
+
+    /**
+     * Unregisters the configuration callback.
+     *
+     * @param callback the callback which has been registered with {@link
+     *     #registerConfigurationCallback}
+     * @throws IllegalArgumentException if {@code callback} hasn't been registered
+     */
+    @FlaggedApi(Flags.FLAG_CONFIGURATION_ENABLED)
+    @RequiresPermission(permission.THREAD_NETWORK_PRIVILEGED)
+    public void unregisterConfigurationCallback(@NonNull Consumer<ThreadConfiguration> callback) {
+        requireNonNull(callback, "callback cannot be null");
+        synchronized (mConfigurationCallbackMapLock) {
+            ConfigurationCallbackProxy callbackProxy = mConfigurationCallbackMap.get(callback);
+            if (callbackProxy == null) {
+                throw new IllegalArgumentException("callback hasn't been registered");
+            }
+            try {
+                mControllerService.unregisterConfigurationCallback(callbackProxy);
+                mConfigurationCallbackMap.remove(callbackProxy.mConfigurationConsumer);
+            } catch (RemoteException e) {
+                e.rethrowFromSystemServer();
+            }
+        }
+    }
+
+    /**
      * Sets to use a specified test network as the upstream.
      *
      * @param testNetworkInterfaceName The name of the test network interface. When it's null,
@@ -607,6 +706,10 @@ public final class ThreadNetworkController {
     /**
      * Sets max power of each channel.
      *
+     * <p>This method sets the max power for the given channel. The platform sets the actual output
+     * power to be less than or equal to the {@code channelMaxPowers} and as close as possible to
+     * the {@code channelMaxPowers}.
+     *
      * <p>If not set, the default max power is set by the Thread HAL service or the Thread radio
      * chip firmware.
      *
@@ -615,22 +718,27 @@ public final class ThreadNetworkController {
      * OutcomeReceiver#onError} will be called with a specific error:
      *
      * <ul>
-     *   <li>{@link ThreadNetworkException#ERROR_UNSUPPORTED_OPERATION} the operation is no
-     *       supported by the platform.
+     *   <li>{@link ThreadNetworkException#ERROR_UNSUPPORTED_FEATURE} the feature is not supported
+     *       by the platform.
      * </ul>
      *
      * @param channelMaxPowers SparseIntArray (key: channel, value: max power) consists of channel
      *     and corresponding max power. Valid channel values should be between {@link
      *     ActiveOperationalDataset#CHANNEL_MIN_24_GHZ} and {@link
-     *     ActiveOperationalDataset#CHANNEL_MAX_24_GHZ}. The unit of the max power is 0.01dBm. Max
-     *     power values should be between INT16_MIN (-32768) and INT16_MAX (32767). If the max power
-     *     is set to INT16_MAX, the corresponding channel is not supported.
+     *     ActiveOperationalDataset#CHANNEL_MAX_24_GHZ}. The unit of the max power is 0.01dBm. For
+     *     example, 1000 means 0.01W and 2000 means 0.1W. If the power value of {@code
+     *     channelMaxPowers} is lower than the minimum output power supported by the platform, the
+     *     output power will be set to the minimum output power supported by the platform. If the
+     *     power value of {@code channelMaxPowers} is higher than the maximum output power supported
+     *     by the platform, the output power will be set to the maximum output power supported by
+     *     the platform. If the power value of {@code channelMaxPowers} is set to {@link
+     *     #MAX_POWER_CHANNEL_DISABLED}, the corresponding channel is disabled.
      * @param executor the executor to execute {@code receiver}.
      * @param receiver the receiver to receive the result of this operation.
      * @throws IllegalArgumentException if the size of {@code channelMaxPowers} is smaller than 1,
      *     or invalid channel or max power is configured.
-     * @hide
      */
+    @FlaggedApi(Flags.FLAG_CHANNEL_MAX_POWERS_ENABLED)
     @RequiresPermission("android.permission.THREAD_NETWORK_PRIVILEGED")
     public final void setChannelMaxPowers(
             @NonNull @Size(min = 1) SparseIntArray channelMaxPowers,
@@ -657,19 +765,6 @@ public final class ThreadNetworkController {
                                 + ActiveOperationalDataset.CHANNEL_MIN_24_GHZ
                                 + ", "
                                 + ActiveOperationalDataset.CHANNEL_MAX_24_GHZ
-                                + "]");
-            }
-
-            if ((maxPower < POWER_LIMITATION_MIN) || (maxPower > POWER_LIMITATION_MAX)) {
-                throw new IllegalArgumentException(
-                        "Channel power ({channel: "
-                                + channel
-                                + ", maxPower: "
-                                + maxPower
-                                + "}) exceeds allowed range ["
-                                + POWER_LIMITATION_MIN
-                                + ", "
-                                + POWER_LIMITATION_MAX
                                 + "]");
             }
         }
@@ -762,6 +857,28 @@ public final class ThreadNetworkController {
         @Override
         public void onError(int errorCode, String errorMessage) {
             propagateError(mExecutor, mResultReceiver, errorCode, errorMessage);
+        }
+    }
+
+    private static final class ConfigurationCallbackProxy extends IConfigurationReceiver.Stub {
+        final Executor mExecutor;
+        final Consumer<ThreadConfiguration> mConfigurationConsumer;
+
+        ConfigurationCallbackProxy(
+                @CallbackExecutor Executor executor,
+                Consumer<ThreadConfiguration> ConfigurationConsumer) {
+            this.mExecutor = executor;
+            this.mConfigurationConsumer = ConfigurationConsumer;
+        }
+
+        @Override
+        public void onConfigurationChanged(ThreadConfiguration configuration) {
+            final long identity = Binder.clearCallingIdentity();
+            try {
+                mExecutor.execute(() -> mConfigurationConsumer.accept(configuration));
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
         }
     }
 }

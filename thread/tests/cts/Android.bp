@@ -21,9 +21,11 @@ package {
 
 android_test {
     name: "CtsThreadNetworkTestCases",
-    defaults: ["cts_defaults"],
+    defaults: [
+        "cts_defaults",
+        "framework-connectivity-test-defaults",
+    ],
     min_sdk_version: "33",
-    sdk_version: "test_current",
     manifest: "AndroidManifest.xml",
     test_config: "AndroidTest.xml",
     srcs: [
@@ -38,6 +40,7 @@ android_test {
     static_libs: [
         "androidx.test.ext.junit",
         "compatibility-device-util-axt",
+        "com.android.net.thread.flags-aconfig-java",
         "ctstestrunner-axt",
         "guava",
         "guava-android-testlib",
@@ -46,8 +49,8 @@ android_test {
         "truth",
     ],
     libs: [
-        "android.test.base",
-        "android.test.runner",
+        "android.test.base.stubs",
+        "android.test.runner.stubs",
         "framework-connectivity-module-api-stubs-including-flagged",
     ],
     // Test coverage system runs on different devices. Need to

@@ -56,6 +56,7 @@ import static android.net.NetworkTemplate.OEM_MANAGED_YES;
 import static android.net.TrafficStats.MB_IN_BYTES;
 import static android.net.TrafficStats.UID_REMOVED;
 import static android.net.TrafficStats.UID_TETHERING;
+import static android.net.TrafficStats.getValueForTypeFromFirstEntry;
 import static android.net.connectivity.ConnectivityCompatChanges.ENABLE_TRAFFICSTATS_RATE_LIMIT_CACHE;
 import static android.net.netstats.NetworkStatsDataMigrationUtils.PREFIX_UID;
 import static android.net.netstats.NetworkStatsDataMigrationUtils.PREFIX_UID_TAG;
@@ -69,19 +70,22 @@ import static com.android.dx.mockito.inline.extended.ExtendedMockito.doThrow;
 import static com.android.server.net.NetworkStatsEventLogger.POLL_REASON_RAT_CHANGED;
 import static com.android.server.net.NetworkStatsEventLogger.PollEvent.pollReasonNameOf;
 import static com.android.server.net.NetworkStatsService.ACTION_NETWORK_STATS_POLL;
+import static com.android.server.net.NetworkStatsService.ACTION_NETWORK_STATS_UPDATED;
+import static com.android.server.net.NetworkStatsService.BROADCAST_NETWORK_STATS_UPDATED_RATE_LIMIT_ENABLED_FLAG;
 import static com.android.server.net.NetworkStatsService.DEFAULT_TRAFFIC_STATS_CACHE_EXPIRY_DURATION_MS;
-import static com.android.server.net.NetworkStatsService.DEFAULT_TRAFFIC_STATS_CACHE_MAX_ENTRIES;
+import static com.android.server.net.NetworkStatsService.DEFAULT_TRAFFIC_STATS_SERVICE_CACHE_MAX_ENTRIES;
 import static com.android.server.net.NetworkStatsService.NETSTATS_FASTDATAINPUT_FALLBACKS_COUNTER_NAME;
 import static com.android.server.net.NetworkStatsService.NETSTATS_FASTDATAINPUT_SUCCESSES_COUNTER_NAME;
 import static com.android.server.net.NetworkStatsService.NETSTATS_IMPORT_ATTEMPTS_COUNTER_NAME;
 import static com.android.server.net.NetworkStatsService.NETSTATS_IMPORT_FALLBACKS_COUNTER_NAME;
 import static com.android.server.net.NetworkStatsService.NETSTATS_IMPORT_SUCCESSES_COUNTER_NAME;
-import static com.android.server.net.NetworkStatsService.TRAFFICSTATS_RATE_LIMIT_CACHE_ENABLED_FLAG;
+import static com.android.server.net.NetworkStatsService.TRAFFICSTATS_SERVICE_RATE_LIMIT_CACHE_ENABLED_FLAG;
 import static com.android.testutils.DevSdkIgnoreRuleKt.SC_V2;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.AdditionalMatchers.aryEq;
@@ -101,8 +105,10 @@ import static org.mockito.Mockito.verify;
 
 import android.annotation.NonNull;
 import android.app.AlarmManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.database.ContentObserver;
@@ -138,6 +144,7 @@ import android.os.UserHandle;
 import android.provider.Settings;
 import android.system.ErrnoException;
 import android.telephony.TelephonyManager;
+import android.testing.TestableLooper;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.IndentingPrintWriter;
@@ -150,6 +157,7 @@ import androidx.test.filters.SmallTest;
 import com.android.connectivity.resources.R;
 import com.android.internal.util.FileRotator;
 import com.android.internal.util.test.BroadcastInterceptingContext;
+import com.android.net.module.util.ArrayTrackRecord;
 import com.android.net.module.util.BpfDump;
 import com.android.net.module.util.IBpfMap;
 import com.android.net.module.util.LocationPermissionChecker;
@@ -613,8 +621,15 @@ public class NetworkStatsServiceTest extends NetworkStatsBaseTest {
         }
 
         @Override
-        public boolean alwaysUseTrafficStatsRateLimitCache(Context ctx) {
-            return mFeatureFlags.getOrDefault(TRAFFICSTATS_RATE_LIMIT_CACHE_ENABLED_FLAG, false);
+        public boolean alwaysUseTrafficStatsServiceRateLimitCache(Context ctx) {
+            return mFeatureFlags.getOrDefault(
+                    TRAFFICSTATS_SERVICE_RATE_LIMIT_CACHE_ENABLED_FLAG, false);
+        }
+
+        @Override
+        public boolean enabledBroadcastNetworkStatsUpdatedRateLimiting(Context ctx) {
+            return mFeatureFlags.getOrDefault(
+                    BROADCAST_NETWORK_STATS_UPDATED_RATE_LIMIT_ENABLED_FLAG, true);
         }
 
         @Override
@@ -623,8 +638,8 @@ public class NetworkStatsServiceTest extends NetworkStatsBaseTest {
         }
 
         @Override
-        public int getTrafficStatsRateLimitCacheMaxEntries() {
-            return DEFAULT_TRAFFIC_STATS_CACHE_MAX_ENTRIES;
+        public int getTrafficStatsServiceRateLimitCacheMaxEntries() {
+            return DEFAULT_TRAFFIC_STATS_SERVICE_CACHE_MAX_ENTRIES;
         }
 
         @Override
@@ -2438,28 +2453,28 @@ public class NetworkStatsServiceTest extends NetworkStatsBaseTest {
         assertUidTotal(sTemplateWifi, UID_GREEN, 64L, 3L, 1024L, 8L, 0);
     }
 
-    @FeatureFlag(name = TRAFFICSTATS_RATE_LIMIT_CACHE_ENABLED_FLAG, enabled = false)
+    @FeatureFlag(name = TRAFFICSTATS_SERVICE_RATE_LIMIT_CACHE_ENABLED_FLAG, enabled = false)
     @Test
     public void testTrafficStatsRateLimitCache_disabledWithCompatChangeEnabled() throws Exception {
         mDeps.setChangeEnabled(ENABLE_TRAFFICSTATS_RATE_LIMIT_CACHE, true);
         doTestTrafficStatsRateLimitCache(true /* expectCached */);
     }
 
-    @FeatureFlag(name = TRAFFICSTATS_RATE_LIMIT_CACHE_ENABLED_FLAG)
+    @FeatureFlag(name = TRAFFICSTATS_SERVICE_RATE_LIMIT_CACHE_ENABLED_FLAG)
     @Test
     public void testTrafficStatsRateLimitCache_enabledWithCompatChangeEnabled() throws Exception {
         mDeps.setChangeEnabled(ENABLE_TRAFFICSTATS_RATE_LIMIT_CACHE, true);
         doTestTrafficStatsRateLimitCache(true /* expectCached */);
     }
 
-    @FeatureFlag(name = TRAFFICSTATS_RATE_LIMIT_CACHE_ENABLED_FLAG, enabled = false)
+    @FeatureFlag(name = TRAFFICSTATS_SERVICE_RATE_LIMIT_CACHE_ENABLED_FLAG, enabled = false)
     @Test
     public void testTrafficStatsRateLimitCache_disabledWithCompatChangeDisabled() throws Exception {
         mDeps.setChangeEnabled(ENABLE_TRAFFICSTATS_RATE_LIMIT_CACHE, false);
         doTestTrafficStatsRateLimitCache(false /* expectCached */);
     }
 
-    @FeatureFlag(name = TRAFFICSTATS_RATE_LIMIT_CACHE_ENABLED_FLAG)
+    @FeatureFlag(name = TRAFFICSTATS_SERVICE_RATE_LIMIT_CACHE_ENABLED_FLAG)
     @Test
     public void testTrafficStatsRateLimitCache_enabledWithCompatChangeDisabled() throws Exception {
         mDeps.setChangeEnabled(ENABLE_TRAFFICSTATS_RATE_LIMIT_CACHE, false);
@@ -2501,11 +2516,13 @@ public class NetworkStatsServiceTest extends NetworkStatsBaseTest {
     private void assertTrafficStatsValues(String iface, int uid, long rxBytes, long rxPackets,
             long txBytes, long txPackets) {
         assertTrafficStatsValuesThat(rxBytes, rxPackets, txBytes, txPackets,
-                (type) -> mService.getTotalStats(type));
+                (type) -> getValueForTypeFromFirstEntry(mService.getTypelessTotalStats(), type));
         assertTrafficStatsValuesThat(rxBytes, rxPackets, txBytes, txPackets,
-                (type) -> mService.getIfaceStats(iface, type));
+                (type) -> getValueForTypeFromFirstEntry(
+                        mService.getTypelessIfaceStats(iface), type)
+        );
         assertTrafficStatsValuesThat(rxBytes, rxPackets, txBytes, txPackets,
-                (type) -> mService.getUidStats(uid, type));
+                (type) -> getValueForTypeFromFirstEntry(mService.getTypelessUidStats(uid), type));
     }
 
     private void assertTrafficStatsValuesThat(long rxBytes, long rxPackets, long txBytes,
@@ -2617,6 +2634,8 @@ public class NetworkStatsServiceTest extends NetworkStatsBaseTest {
 
     private void mockDefaultSettings() throws Exception {
         mockSettings(HOUR_IN_MILLIS, WEEK_IN_MILLIS);
+        mSettings.setBroadcastNetworkStatsUpdateDelayMs(
+                NetworkStatsService.BROADCAST_NETWORK_STATS_UPDATED_DELAY_MS);
     }
 
     private void mockSettings(long bucketDuration, long deleteAge) {
@@ -2631,6 +2650,8 @@ public class NetworkStatsServiceTest extends NetworkStatsBaseTest {
         @NonNull
         private volatile Config mConfig;
         private final AtomicBoolean mCombineSubtypeEnabled = new AtomicBoolean();
+        private long mBroadcastNetworkStatsUpdateDelayMs =
+                NetworkStatsService.BROADCAST_NETWORK_STATS_UPDATED_DELAY_MS;
 
         TestNetworkStatsSettings(long bucketDuration, long deleteAge) {
             mConfig = new Config(bucketDuration, deleteAge, deleteAge);
@@ -2692,6 +2713,15 @@ public class NetworkStatsServiceTest extends NetworkStatsBaseTest {
         @Override
         public boolean getAugmentEnabled() {
             return false;
+        }
+
+        @Override
+        public long getBroadcastNetworkStatsUpdateDelayMs() {
+            return mBroadcastNetworkStatsUpdateDelayMs;
+        }
+
+        public void setBroadcastNetworkStatsUpdateDelayMs(long broadcastDelay) {
+            mBroadcastNetworkStatsUpdateDelayMs = broadcastDelay;
         }
     }
 
@@ -3063,5 +3093,92 @@ public class NetworkStatsServiceTest extends NetworkStatsBaseTest {
 
         final String dump = getDump();
         assertDumpContains(dump, "Log for testing");
+    }
+
+    private static class TestNetworkStatsUpdatedReceiver extends BroadcastReceiver {
+        private final ArrayTrackRecord<Intent>.ReadHead mHistory;
+
+        TestNetworkStatsUpdatedReceiver() {
+            mHistory = (new ArrayTrackRecord<Intent>()).newReadHead();
+        }
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            mHistory.add(intent);
+        }
+
+        /**
+         * Assert no broadcast intent is received in blocking manner
+         */
+        public void assertNoBroadcastIntentReceived()  {
+            assertNull(mHistory.peek());
+        }
+
+        /**
+         * Assert an intent is received and remove it from queue
+         */
+        public void assertBroadcastIntentReceived() {
+            assertNotNull(mHistory.poll(WAIT_TIMEOUT, number -> true));
+        }
+    }
+
+    @FeatureFlag(name = BROADCAST_NETWORK_STATS_UPDATED_RATE_LIMIT_ENABLED_FLAG)
+    @Test
+    public void testNetworkStatsUpdatedIntentSpam_rateLimitOn() throws Exception {
+        // Set the update delay long enough that messages won't be processed before unblocked
+        // Set a short time to test the behavior before reaching delay.
+        // Constraint: test running time < toleranceMs < update delay time
+        mSettings.setBroadcastNetworkStatsUpdateDelayMs(100_000L);
+        final long toleranceMs = 5000;
+
+        final TestableLooper mTestableLooper = new TestableLooper(mHandlerThread.getLooper());
+        final TestNetworkStatsUpdatedReceiver receiver = new TestNetworkStatsUpdatedReceiver();
+        mServiceContext.registerReceiver(receiver, new IntentFilter(ACTION_NETWORK_STATS_UPDATED));
+
+        try {
+            // Test that before anything, the intent is delivered immediately
+            mService.forceUpdate();
+            mTestableLooper.processAllMessages();
+            receiver.assertBroadcastIntentReceived();
+            receiver.assertNoBroadcastIntentReceived();
+
+            // Test that the next two intents results in exactly one intent delivered
+            for (int i = 0; i < 2; i++) {
+                mService.forceUpdate();
+            }
+            // Test that the delay depends on our set value
+            mTestableLooper.moveTimeForward(mSettings.getBroadcastNetworkStatsUpdateDelayMs()
+                    - toleranceMs);
+            mTestableLooper.processAllMessages();
+            receiver.assertNoBroadcastIntentReceived();
+
+            // Unblock messages and test that the second and third update
+            // is broadcasted right after the delay
+            mTestableLooper.moveTimeForward(toleranceMs);
+            mTestableLooper.processAllMessages();
+            receiver.assertBroadcastIntentReceived();
+            receiver.assertNoBroadcastIntentReceived();
+
+        } finally {
+            mTestableLooper.destroy();
+        }
+    }
+
+    @FeatureFlag(name = BROADCAST_NETWORK_STATS_UPDATED_RATE_LIMIT_ENABLED_FLAG, enabled = false)
+    @Test
+    public void testNetworkStatsUpdatedIntentSpam_rateLimitOff() throws Exception {
+        // Set the update delay long enough to ensure that messages are processed
+        // despite the rate limit.
+        mSettings.setBroadcastNetworkStatsUpdateDelayMs(100_000L);
+
+        final TestNetworkStatsUpdatedReceiver receiver = new TestNetworkStatsUpdatedReceiver();
+        mServiceContext.registerReceiver(receiver, new IntentFilter(ACTION_NETWORK_STATS_UPDATED));
+
+        for (int i = 0; i < 2; i++) {
+            mService.forceUpdate();
+            waitForIdle();
+            receiver.assertBroadcastIntentReceived();
+        }
+        receiver.assertNoBroadcastIntentReceived();
     }
 }

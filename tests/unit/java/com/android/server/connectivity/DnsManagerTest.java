@@ -54,6 +54,7 @@ import android.net.NetworkCapabilities;
 import android.net.ResolverOptionsParcel;
 import android.net.ResolverParamsParcel;
 import android.net.RouteInfo;
+import android.net.resolv.aidl.DohParamsParcel;
 import android.net.shared.PrivateDnsConfig;
 import android.os.Build;
 import android.provider.Settings;
@@ -324,11 +325,10 @@ public class DnsManagerTest {
         assertEquals(new InetAddress[0], cfgStrict.ips);
     }
 
-    @Test
-    public void testSendDnsConfiguration() throws Exception {
+    private void doTestSendDnsConfiguration(PrivateDnsConfig cfg, DohParamsParcel expectedDohParams)
+            throws Exception {
         reset(mMockDnsResolver);
-        mDnsManager.updatePrivateDns(new Network(TEST_NETID),
-                mDnsManager.getPrivateDnsConfig());
+        mDnsManager.updatePrivateDns(new Network(TEST_NETID), cfg);
         final LinkProperties lp = new LinkProperties();
         lp.setInterfaceName(TEST_IFACENAME);
         lp.addDnsServer(InetAddress.getByName("3.3.3.3"));
@@ -352,9 +352,60 @@ public class DnsManagerTest {
         expectedParams.transportTypes = TEST_TRANSPORT_TYPES;
         expectedParams.resolverOptions = null;
         expectedParams.meteredNetwork = true;
-        expectedParams.dohParams = null;
+        expectedParams.dohParams = expectedDohParams;
         expectedParams.interfaceNames = new String[]{TEST_IFACENAME};
         verify(mMockDnsResolver, times(1)).setResolverConfiguration(eq(expectedParams));
+    }
+
+    @Test
+    public void testSendDnsConfiguration_ddrDisabled() throws Exception {
+        final PrivateDnsConfig cfg = new PrivateDnsConfig(
+                PRIVATE_DNS_MODE_OPPORTUNISTIC /* mode */,
+                null /* hostname */,
+                null /* ips */,
+                false /* ddrEnabled */,
+                null /* dohName */,
+                null /* dohIps */,
+                null /* dohPath */,
+                -1 /* dohPort */);
+        doTestSendDnsConfiguration(cfg, null /* expectedDohParams */);
+    }
+
+    @Test
+    public void testSendDnsConfiguration_ddrEnabledEmpty() throws Exception {
+        final PrivateDnsConfig cfg = new PrivateDnsConfig(
+                PRIVATE_DNS_MODE_OPPORTUNISTIC /* mode */,
+                null /* hostname */,
+                null /* ips */,
+                true /* ddrEnabled */,
+                null /* dohName */,
+                null /* dohIps */,
+                null /* dohPath */,
+                -1 /* dohPort */);
+
+        final DohParamsParcel params = new DohParamsParcel.Builder().build();
+        doTestSendDnsConfiguration(cfg, params);
+    }
+
+    @Test
+    public void testSendDnsConfiguration_ddrEnabled() throws Exception {
+        final PrivateDnsConfig cfg = new PrivateDnsConfig(
+                PRIVATE_DNS_MODE_OPPORTUNISTIC /* mode */,
+                null /* hostname */,
+                null /* ips */,
+                true /* ddrEnabled */,
+                "doh.com" /* dohName */,
+                null /* dohIps */,
+                "/some-path{?dns}" /* dohPath */,
+                5353 /* dohPort */);
+
+        final DohParamsParcel params = new DohParamsParcel.Builder()
+                .setName("doh.com")
+                .setDohpath("/some-path{?dns}")
+                .setPort(5353)
+                .build();
+
+        doTestSendDnsConfiguration(cfg, params);
     }
 
     @Test

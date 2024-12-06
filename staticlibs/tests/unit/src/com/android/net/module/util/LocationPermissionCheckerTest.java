@@ -18,17 +18,17 @@ package com.android.net.module.util;
 import static android.Manifest.permission.NETWORK_SETTINGS;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import android.Manifest;
 import android.app.AppOpsManager;
@@ -46,7 +46,6 @@ import androidx.annotation.RequiresApi;
 
 import com.android.testutils.DevSdkIgnoreRule;
 
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -106,17 +105,18 @@ public class LocationPermissionCheckerTest {
     }
 
     private void setupMocks() throws Exception {
-        when(mMockPkgMgr.getApplicationInfoAsUser(eq(TEST_PKG_NAME), eq(0), any()))
-                .thenReturn(mMockApplInfo);
-        when(mMockContext.getPackageManager()).thenReturn(mMockPkgMgr);
-        when(mMockAppOps.noteOp(AppOpsManager.OPSTR_WIFI_SCAN, mUid, TEST_PKG_NAME,
-                TEST_FEATURE_ID, null)).thenReturn(mWifiScanAllowApps);
-        when(mMockAppOps.noteOp(eq(AppOpsManager.OPSTR_COARSE_LOCATION), eq(mUid),
-                eq(TEST_PKG_NAME), eq(TEST_FEATURE_ID), nullable(String.class)))
-                .thenReturn(mAllowCoarseLocationApps);
-        when(mMockAppOps.noteOp(eq(AppOpsManager.OPSTR_FINE_LOCATION), eq(mUid),
-                eq(TEST_PKG_NAME), eq(TEST_FEATURE_ID), nullable(String.class)))
-                .thenReturn(mAllowFineLocationApps);
+        doReturn(mMockApplInfo).when(mMockPkgMgr)
+                .getApplicationInfoAsUser(eq(TEST_PKG_NAME), eq(0), any());
+        doReturn(mMockPkgMgr).when(mMockContext).getPackageManager();
+        doReturn(mWifiScanAllowApps).when(mMockAppOps).noteOp(
+                AppOpsManager.OPSTR_WIFI_SCAN, mUid, TEST_PKG_NAME,
+                TEST_FEATURE_ID, null);
+        doReturn(mAllowCoarseLocationApps).when(mMockAppOps).noteOp(
+                eq(AppOpsManager.OPSTR_COARSE_LOCATION), eq(mUid),
+                eq(TEST_PKG_NAME), eq(TEST_FEATURE_ID), nullable(String.class));
+        doReturn(mAllowFineLocationApps).when(mMockAppOps).noteOp(
+                eq(AppOpsManager.OPSTR_FINE_LOCATION), eq(mUid),
+                eq(TEST_PKG_NAME), eq(TEST_FEATURE_ID), nullable(String.class));
         if (mThrowSecurityException) {
             doThrow(new SecurityException("Package " + TEST_PKG_NAME + " doesn't belong"
                     + " to application bound to user " + mUid))
@@ -128,10 +128,10 @@ public class LocationPermissionCheckerTest {
     }
 
     private <T> void mockSystemService(String name, Class<T> clazz, T service) {
-        when(mMockContext.getSystemService(name)).thenReturn(service);
-        when(mMockContext.getSystemServiceName(clazz)).thenReturn(name);
+        doReturn(service).when(mMockContext).getSystemService(name);
+        doReturn(name).when(mMockContext).getSystemServiceName(clazz);
         // Do not use mockito extended final method mocking
-        when(mMockContext.getSystemService(clazz)).thenCallRealMethod();
+        doCallRealMethod().when(mMockContext).getSystemService(clazz);
     }
 
     private void setupTestCase() throws Exception {
@@ -167,16 +167,17 @@ public class LocationPermissionCheckerTest {
         Binder.restoreCallingIdentity((((long) mUid) << 32) | Binder.getCallingPid());
         doAnswer(mReturnPermission).when(mMockContext).checkPermission(
                 anyString(), anyInt(), anyInt());
-        when(mMockUserManager.isSameProfileGroup(UserHandle.SYSTEM,
-                UserHandle.getUserHandleForUid(MANAGED_PROFILE_UID)))
-                .thenReturn(true);
-        when(mMockContext.checkPermission(mManifestStringCoarse, -1, mUid))
-                .thenReturn(mCoarseLocationPermission);
-        when(mMockContext.checkPermission(mManifestStringFine, -1, mUid))
-                .thenReturn(mFineLocationPermission);
-        when(mMockContext.checkPermission(NETWORK_SETTINGS, -1, mUid))
-                .thenReturn(mNetworkSettingsPermission);
-        when(mLocationManager.isLocationEnabledForUser(any())).thenReturn(mIsLocationEnabled);
+        doReturn(true).when(mMockUserManager)
+                .isSameProfileGroup(UserHandle.SYSTEM,
+                UserHandle.getUserHandleForUid(MANAGED_PROFILE_UID));
+        doReturn(mCoarseLocationPermission).when(mMockContext)
+                .checkPermission(mManifestStringCoarse, -1, mUid);
+        doReturn(mFineLocationPermission).when(mMockContext)
+                .checkPermission(mManifestStringFine, -1, mUid);
+        doReturn(mNetworkSettingsPermission).when(mMockContext)
+                .checkPermission(NETWORK_SETTINGS, -1, mUid);
+        doReturn(mIsLocationEnabled).when(mLocationManager)
+                .isLocationEnabledForUser(any());
     }
 
     private Answer<Integer> createPermissionAnswer() {
@@ -208,7 +209,7 @@ public class LocationPermissionCheckerTest {
         setupTestCase();
 
         final int result =
-                mChecker.checkLocationPermissionWithDetailInfo(
+                mChecker.checkLocationPermissionInternal(
                         TEST_PKG_NAME, TEST_FEATURE_ID, mUid, null);
         assertEquals(LocationPermissionChecker.SUCCEEDED, result);
     }
@@ -225,7 +226,7 @@ public class LocationPermissionCheckerTest {
         setupTestCase();
 
         final int result =
-                mChecker.checkLocationPermissionWithDetailInfo(
+                mChecker.checkLocationPermissionInternal(
                         TEST_PKG_NAME, TEST_FEATURE_ID, mUid, null);
         assertEquals(LocationPermissionChecker.SUCCEEDED, result);
     }
@@ -239,9 +240,9 @@ public class LocationPermissionCheckerTest {
         mWifiScanAllowApps = AppOpsManager.MODE_ALLOWED;
         setupTestCase();
 
-        assertThrows(SecurityException.class,
-                () -> mChecker.checkLocationPermissionWithDetailInfo(
-                        TEST_PKG_NAME, TEST_FEATURE_ID, mUid, null));
+        final int result = mChecker.checkLocationPermissionInternal(
+                        TEST_PKG_NAME, TEST_FEATURE_ID, mUid, null);
+        assertEquals(LocationPermissionChecker.ERROR_LOCATION_PERMISSION_MISSING, result);
     }
 
     @Test
@@ -251,7 +252,7 @@ public class LocationPermissionCheckerTest {
         setupTestCase();
 
         final int result =
-                mChecker.checkLocationPermissionWithDetailInfo(
+                mChecker.checkLocationPermissionInternal(
                         TEST_PKG_NAME, TEST_FEATURE_ID, mUid, null);
         assertEquals(LocationPermissionChecker.ERROR_LOCATION_PERMISSION_MISSING, result);
     }
@@ -267,7 +268,7 @@ public class LocationPermissionCheckerTest {
         setupTestCase();
 
         final int result =
-                mChecker.checkLocationPermissionWithDetailInfo(
+                mChecker.checkLocationPermissionInternal(
                         TEST_PKG_NAME, TEST_FEATURE_ID, mUid, null);
         assertEquals(LocationPermissionChecker.ERROR_LOCATION_PERMISSION_MISSING, result);
         verify(mMockAppOps, never()).noteOp(anyInt(), anyInt(), anyString());
@@ -284,7 +285,7 @@ public class LocationPermissionCheckerTest {
         setupTestCase();
 
         final int result =
-                mChecker.checkLocationPermissionWithDetailInfo(
+                mChecker.checkLocationPermissionInternal(
                         TEST_PKG_NAME, TEST_FEATURE_ID, mUid, null);
         assertEquals(LocationPermissionChecker.ERROR_LOCATION_MODE_OFF, result);
     }
@@ -298,18 +299,8 @@ public class LocationPermissionCheckerTest {
         setupTestCase();
 
         final int result =
-                mChecker.checkLocationPermissionWithDetailInfo(
+                mChecker.checkLocationPermissionInternal(
                         TEST_PKG_NAME, TEST_FEATURE_ID, mUid, null);
         assertEquals(LocationPermissionChecker.SUCCEEDED, result);
-    }
-
-
-    private static void assertThrows(Class<? extends Exception> exceptionClass, Runnable r) {
-        try {
-            r.run();
-            Assert.fail("Expected " + exceptionClass + " to be thrown.");
-        } catch (Exception exception) {
-            assertTrue(exceptionClass.isInstance(exception));
-        }
     }
 }

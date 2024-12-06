@@ -30,6 +30,7 @@ import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.Log;
 
+import com.android.net.flags.Flags;
 import com.android.net.module.util.InetAddressUtils;
 
 import java.io.UnsupportedEncodingException;
@@ -180,8 +181,18 @@ public final class NsdServiceInfo implements Parcelable {
         return new ArrayList<>(mHostAddresses);
     }
 
-    /** Set the host addresses */
+    /**
+     * Set the host addresses.
+     *
+     * <p>When registering hosts/services, there can only be one registration including address
+     * records for a given hostname.
+     *
+     * <p>For example, if a client registers a service with the hostname "MyHost" and the address
+     * records of 192.168.1.1 and 192.168.1.2, then other registrations for the hostname "MyHost"
+     * must not have any address record, otherwise there will be a conflict.
+     */
     public void setHostAddresses(@NonNull List<InetAddress> addresses) {
+        // TODO: b/284905335 - Notify the client when there is a conflict.
         mHostAddresses.clear();
         mHostAddresses.addAll(addresses);
     }
@@ -517,7 +528,7 @@ public final class NsdServiceInfo implements Parcelable {
      * Only one subtype will be registered if multiple elements of {@code subtypes} have the same
      * case-insensitive value.
      */
-    @FlaggedApi(NsdManager.Flags.NSD_SUBTYPES_SUPPORT_ENABLED)
+    @FlaggedApi(Flags.FLAG_NSD_SUBTYPES_SUPPORT_ENABLED)
     public void setSubtypes(@NonNull Set<String> subtypes) {
         mSubtypes.clear();
         mSubtypes.addAll(subtypes);
@@ -530,7 +541,7 @@ public final class NsdServiceInfo implements Parcelable {
      * NsdManager.DiscoveryListener}), the return value may or may not include the subtypes of this
      * service.
      */
-    @FlaggedApi(NsdManager.Flags.NSD_SUBTYPES_SUPPORT_ENABLED)
+    @FlaggedApi(Flags.FLAG_NSD_SUBTYPES_SUPPORT_ENABLED)
     @NonNull
     public Set<String> getSubtypes() {
         return Collections.unmodifiableSet(mSubtypes);

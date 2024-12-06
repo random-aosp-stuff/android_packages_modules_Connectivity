@@ -63,6 +63,7 @@ java_defaults {
         ":framework-connectivity-sources",
         ":net-utils-framework-common-srcs",
         ":framework-connectivity-api-shared-srcs",
+        ":framework-networksecurity-sources",
     ],
     aidl: {
         generate_get_transaction_name: true,
@@ -86,17 +87,18 @@ java_defaults {
         "framework-wifi.stubs.module_lib",
     ],
     static_libs: [
+        "com.android.net.flags-aconfig-java",
         // Not using the latest stable version because all functions in the latest version of
         // mdns_aidl_interface are deprecated.
         "mdns_aidl_interface-V1-java",
         "modules-utils-backgroundthread",
         "modules-utils-build",
         "modules-utils-preconditions",
+        "networksecurity_flags_java_lib",
         "framework-connectivity-javastream-protos",
     ],
     impl_only_static_libs: [
-        "net-utils-device-common-bpf",
-        "net-utils-device-common-struct-base",
+        "net-utils-framework-connectivity",
     ],
     libs: [
         "androidx.annotation_annotation",
@@ -109,22 +111,20 @@ java_defaults {
     ],
 }
 
+// Library to allow Cronet to use hidden APIs
 java_library {
-    name: "framework-connectivity-pre-jarjar",
+    name: "framework-connectivity-pre-jarjar-without-cronet",
     defaults: [
         "framework-connectivity-defaults",
     ],
     static_libs: [
-        "httpclient_api",
-        "httpclient_impl",
         // Framework-connectivity-pre-jarjar is identical to framework-connectivity
         // implementation, but without the jarjar rules. However, framework-connectivity
         // is not based on framework-connectivity-pre-jarjar, it's rebuilt from source
         // to generate the SDK stubs.
         // Even if the library is included in "impl_only_static_libs" of defaults. This is still
         // needed because java_library which doesn't understand "impl_only_static_libs".
-        "net-utils-device-common-bpf",
-        "net-utils-device-common-struct-base",
+        "net-utils-framework-connectivity",
     ],
     libs: [
         // This cannot be in the defaults clause above because if it were, it would be used
@@ -134,6 +134,21 @@ java_library {
         "framework-location.stubs.module_lib",
         "framework-tethering.impl",
         "framework-wifi.stubs.module_lib",
+    ],
+    visibility: ["//external/cronet:__subpackages__"],
+}
+
+java_library {
+    name: "framework-connectivity-pre-jarjar",
+    defaults: ["framework-module-defaults"],
+    min_sdk_version: "30",
+    static_libs: [
+        "framework-connectivity-pre-jarjar-without-cronet",
+        "httpclient_api",
+        "httpclient_impl",
+    ],
+    apex_available: [
+        "com.android.tethering",
     ],
     visibility: ["//packages/modules/Connectivity:__subpackages__"],
 }
@@ -163,8 +178,10 @@ java_sdk_library {
         // In preparation for future move
         "//packages/modules/Connectivity/apex",
         "//packages/modules/Connectivity/framework-t",
+        "//packages/modules/Connectivity/remoteauth/service",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service-t",
+        "//packages/modules/Connectivity/staticlibs",
         "//frameworks/base",
 
         // Tests using hidden APIs
@@ -186,6 +203,7 @@ java_sdk_library {
         "//packages/modules/Connectivity/tests:__subpackages__",
         "//packages/modules/Connectivity/thread/tests:__subpackages__",
         "//packages/modules/IPsec/tests/iketests",
+        "//packages/modules/NetworkStack",
         "//packages/modules/NetworkStack/tests:__subpackages__",
         "//packages/modules/Wifi/service/tests/wifitests",
     ],
@@ -194,6 +212,7 @@ java_sdk_library {
     },
     aconfig_declarations: [
         "com.android.net.flags-aconfig",
+        "com.android.networksecurity.flags-aconfig",
     ],
 }
 
@@ -294,6 +313,7 @@ droidstubs {
     srcs: [
         ":framework-connectivity-sources",
         ":framework-connectivity-tiramisu-updatable-sources",
+        ":framework-networksecurity-sources",
         ":framework-nearby-java-sources",
         ":framework-thread-sources",
     ],
@@ -332,7 +352,6 @@ java_library {
     srcs: [
         // Files listed here MUST all be annotated with @RequiresApi(Build.VERSION_CODES.S)
         // or above as appropriate so that API checks are enforced for R+ users of this library
-        "src/android/net/RoutingCoordinatorManager.java",
         "src/android/net/connectivity/ConnectivityInternalApiUtil.java",
     ],
     visibility: [

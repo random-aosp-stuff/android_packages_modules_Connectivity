@@ -16,6 +16,7 @@
 
 package com.android.server.connectivity.mdns;
 
+import static com.android.server.connectivity.mdns.MdnsSearchOptions.AGGRESSIVE_QUERY_MODE;
 import static com.android.server.connectivity.mdns.MdnsServiceCache.ServiceExpiredCallback;
 import static com.android.server.connectivity.mdns.MdnsServiceCache.findMatchedResponse;
 import static com.android.server.connectivity.mdns.util.MdnsUtils.Clock;
@@ -33,6 +34,7 @@ import android.util.Pair;
 import androidx.annotation.VisibleForTesting;
 
 import com.android.net.module.util.CollectionUtils;
+import com.android.net.module.util.DnsUtils;
 import com.android.net.module.util.SharedLog;
 import com.android.server.connectivity.mdns.util.MdnsUtils;
 
@@ -120,11 +122,11 @@ public class MdnsServiceTypeClient {
          * @return true if the service name was not discovered before.
          */
         boolean setServiceDiscovered(@NonNull String serviceName) {
-            return discoveredServiceNames.add(MdnsUtils.toDnsLowerCase(serviceName));
+            return discoveredServiceNames.add(DnsUtils.toDnsUpperCase(serviceName));
         }
 
         void unsetServiceDiscovered(@NonNull String serviceName) {
-            discoveredServiceNames.remove(MdnsUtils.toDnsLowerCase(serviceName));
+            discoveredServiceNames.remove(DnsUtils.toDnsUpperCase(serviceName));
         }
     }
 
@@ -147,7 +149,8 @@ public class MdnsServiceTypeClient {
                     final List<MdnsResponse> servicesToResolve = makeResponsesForResolve(socketKey);
                     final QueryTask queryTask = new QueryTask(taskArgs, servicesToResolve,
                             getAllDiscoverySubtypes(), needSendDiscoveryQueries(listeners),
-                            getExistingServices());
+                            getExistingServices(), searchOptions.onlyUseIpv6OnIpv6OnlyNetworks(),
+                            socketKey);
                     executor.submit(queryTask);
                     break;
                 }
@@ -178,7 +181,10 @@ public class MdnsServiceTypeClient {
                                     minRemainingTtl,
                                     now,
                                     lastSentTime,
-                                    sentResult.taskArgs.sessionId
+                                    sentResult.taskArgs.sessionId,
+                                    searchOptions.getQueryMode(),
+                                    searchOptions.numOfQueriesBeforeBackoff(),
+                                    false /* forceEnableBackoff */
                             );
                     dependencies.sendMessageDelayed(
                             handler,
@@ -303,8 +309,8 @@ public class MdnsServiceTypeClient {
         serviceCache.unregisterServiceExpiredCallback(cacheKey);
     }
 
-    private static MdnsServiceInfo buildMdnsServiceInfoFromResponse(
-            @NonNull MdnsResponse response, @NonNull String[] serviceTypeLabels) {
+    private static MdnsServiceInfo buildMdnsServiceInfoFromResponse(@NonNull MdnsResponse response,
+            @NonNull String[] serviceTypeLabels, long elapsedRealtimeMillis) {
         String[] hostName = null;
         int port = 0;
         if (response.hasServiceRecord()) {
@@ -351,7 +357,7 @@ public class MdnsServiceTypeClient {
                 textEntries,
                 response.getInterfaceIndex(),
                 response.getNetwork(),
-                now.plusMillis(response.getMinRemainingTtl(now.toEpochMilli())));
+                now.plusMillis(response.getMinRemainingTtl(elapsedRealtimeMillis)));
     }
 
     private List<MdnsResponse> getExistingServices() {
@@ -380,8 +386,8 @@ public class MdnsServiceTypeClient {
         if (existingInfo == null) {
             for (MdnsResponse existingResponse : serviceCache.getCachedServices(cacheKey)) {
                 if (!responseMatchesOptions(existingResponse, searchOptions)) continue;
-                final MdnsServiceInfo info =
-                        buildMdnsServiceInfoFromResponse(existingResponse, serviceTypeLabels);
+                final MdnsServiceInfo info = buildMdnsServiceInfoFromResponse(
+                        existingResponse, serviceTypeLabels, clock.elapsedRealtime());
                 listener.onServiceNameDiscovered(info, true /* isServiceFromCache */);
                 listenerInfo.setServiceDiscovered(info.getServiceInstanceName());
                 if (existingResponse.isComplete()) {
@@ -392,14 +398,13 @@ public class MdnsServiceTypeClient {
         }
         // Remove the next scheduled periodical task.
         removeScheduledTask();
-        mdnsQueryScheduler.cancelScheduledRun();
-        // Keep tracking the ScheduledFuture for the task so we can cancel it if caller is not
-        // interested anymore.
-        final QueryTaskConfig taskConfig = new QueryTaskConfig(
-                searchOptions.getQueryMode(),
-                searchOptions.onlyUseIpv6OnIpv6OnlyNetworks(),
-                searchOptions.numOfQueriesBeforeBackoff(),
-                socketKey);
+        final boolean forceEnableBackoff =
+                (searchOptions.getQueryMode() == AGGRESSIVE_QUERY_MODE && hadReply);
+        // Keep the latest scheduled run for rescheduling if there is a service in the cache.
+        if (!(forceEnableBackoff)) {
+            mdnsQueryScheduler.cancelScheduledRun();
+        }
+        final QueryTaskConfig taskConfig = new QueryTaskConfig(searchOptions.getQueryMode());
         final long now = clock.elapsedRealtime();
         if (lastSentTime == 0) {
             lastSentTime = now;
@@ -412,7 +417,10 @@ public class MdnsServiceTypeClient {
                             minRemainingTtl,
                             now,
                             lastSentTime,
-                            currentSessionId
+                            currentSessionId,
+                            searchOptions.getQueryMode(),
+                            searchOptions.numOfQueriesBeforeBackoff(),
+                            forceEnableBackoff
                     );
             dependencies.sendMessageDelayed(
                     handler,
@@ -424,7 +432,8 @@ public class MdnsServiceTypeClient {
                     mdnsQueryScheduler.scheduleFirstRun(taskConfig, now,
                             minRemainingTtl, currentSessionId), servicesToResolve,
                     getAllDiscoverySubtypes(), needSendDiscoveryQueries(listeners),
-                    getExistingServices());
+                    getExistingServices(), searchOptions.onlyUseIpv6OnIpv6OnlyNetworks(),
+                    socketKey);
             executor.submit(queryTask);
         }
 
@@ -447,6 +456,14 @@ public class MdnsServiceTypeClient {
         return executor;
     }
 
+    /**
+     * Get the cache key for this service type client.
+     */
+    @NonNull
+    public MdnsServiceCache.CacheKey getCacheKey() {
+        return cacheKey;
+    }
+
     private void removeScheduledTask() {
         dependencies.removeMessages(handler, EVENT_START_QUERYTASK);
         sharedLog.log("Remove EVENT_START_QUERYTASK"
@@ -458,7 +475,7 @@ public class MdnsServiceTypeClient {
             @NonNull MdnsSearchOptions options) {
         final boolean matchesInstanceName = options.getResolveInstanceName() == null
                 // DNS is case-insensitive, so ignore case in the comparison
-                || MdnsUtils.equalsIgnoreDnsCase(options.getResolveInstanceName(),
+                || DnsUtils.equalsIgnoreDnsCase(options.getResolveInstanceName(),
                 response.getServiceInstanceName());
 
         // If discovery is requiring some subtypes, the response must have one that matches a
@@ -468,7 +485,7 @@ public class MdnsServiceTypeClient {
         final boolean matchesSubtype = options.getSubtypes().size() == 0
                 || CollectionUtils.any(options.getSubtypes(), requiredSub ->
                 CollectionUtils.any(responseSubtypes, actualSub ->
-                        MdnsUtils.equalsIgnoreDnsCase(
+                        DnsUtils.equalsIgnoreDnsCase(
                                 MdnsConstants.SUBTYPE_PREFIX + requiredSub, actualSub)));
 
         return matchesInstanceName && matchesSubtype;
@@ -535,7 +552,8 @@ public class MdnsServiceTypeClient {
             final long minRemainingTtl = getMinRemainingTtl(now);
             MdnsQueryScheduler.ScheduledQueryTaskArgs args =
                     mdnsQueryScheduler.maybeRescheduleCurrentRun(now, minRemainingTtl,
-                            lastSentTime, currentSessionId + 1);
+                            lastSentTime, currentSessionId + 1,
+                            searchOptions.numOfQueriesBeforeBackoff());
             if (args != null) {
                 removeScheduledTask();
                 dependencies.sendMessageDelayed(
@@ -561,7 +579,7 @@ public class MdnsServiceTypeClient {
             if (response.getServiceInstanceName() != null) {
                 listeners.valueAt(i).unsetServiceDiscovered(response.getServiceInstanceName());
                 final MdnsServiceInfo serviceInfo = buildMdnsServiceInfoFromResponse(
-                        response, serviceTypeLabels);
+                        response, serviceTypeLabels, clock.elapsedRealtime());
                 if (response.isComplete()) {
                     sharedLog.log(message + ". onServiceRemoved: " + serviceInfo);
                     listener.onServiceRemoved(serviceInfo);
@@ -605,8 +623,8 @@ public class MdnsServiceTypeClient {
                         + " %b, responseIsComplete: %b",
                 serviceInstanceName, newInCache, serviceBecomesComplete,
                 response.isComplete()));
-        MdnsServiceInfo serviceInfo =
-                buildMdnsServiceInfoFromResponse(response, serviceTypeLabels);
+        final MdnsServiceInfo serviceInfo = buildMdnsServiceInfoFromResponse(
+                response, serviceTypeLabels, clock.elapsedRealtime());
 
         for (int i = 0; i < listeners.size(); i++) {
             // If a service stops matching the options (currently can only happen if it loses a
@@ -658,7 +676,7 @@ public class MdnsServiceTypeClient {
                 continue;
             }
             if (CollectionUtils.any(resolveResponses,
-                    r -> MdnsUtils.equalsIgnoreDnsCase(resolveName, r.getServiceInstanceName()))) {
+                    r -> DnsUtils.equalsIgnoreDnsCase(resolveName, r.getServiceInstanceName()))) {
                 continue;
             }
             MdnsResponse knownResponse =
@@ -723,15 +741,21 @@ public class MdnsServiceTypeClient {
         private final List<String> subtypes = new ArrayList<>();
         private final boolean sendDiscoveryQueries;
         private final List<MdnsResponse> existingServices = new ArrayList<>();
+        private final boolean onlyUseIpv6OnIpv6OnlyNetworks;
+        private final SocketKey socketKey;
         QueryTask(@NonNull MdnsQueryScheduler.ScheduledQueryTaskArgs taskArgs,
                 @NonNull Collection<MdnsResponse> servicesToResolve,
                 @NonNull Collection<String> subtypes, boolean sendDiscoveryQueries,
-                @NonNull Collection<MdnsResponse> existingServices) {
+                @NonNull Collection<MdnsResponse> existingServices,
+                boolean onlyUseIpv6OnIpv6OnlyNetworks,
+                @NonNull SocketKey socketKey) {
             this.taskArgs = taskArgs;
             this.servicesToResolve.addAll(servicesToResolve);
             this.subtypes.addAll(subtypes);
             this.sendDiscoveryQueries = sendDiscoveryQueries;
             this.existingServices.addAll(existingServices);
+            this.onlyUseIpv6OnIpv6OnlyNetworks = onlyUseIpv6OnIpv6OnlyNetworks;
+            this.socketKey = socketKey;
         }
 
         @Override
@@ -745,8 +769,8 @@ public class MdnsServiceTypeClient {
                                 subtypes,
                                 taskArgs.config.expectUnicastResponse,
                                 taskArgs.config.transactionId,
-                                taskArgs.config.socketKey,
-                                taskArgs.config.onlyUseIpv6OnIpv6OnlyNetworks,
+                                socketKey,
+                                onlyUseIpv6OnIpv6OnlyNetworks,
                                 sendDiscoveryQueries,
                                 servicesToResolve,
                                 clock,

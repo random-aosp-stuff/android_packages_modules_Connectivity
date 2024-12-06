@@ -29,6 +29,7 @@ import static android.net.resolv.aidl.IDnsResolverUnsolicitedEventListener.VALID
 import static android.net.resolv.aidl.IDnsResolverUnsolicitedEventListener.VALIDATION_RESULT_SUCCESS;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -41,6 +42,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.ResolverParamsParcel;
 import android.net.Uri;
+import android.net.resolv.aidl.DohParamsParcel;
 import android.net.shared.PrivateDnsConfig;
 import android.os.Binder;
 import android.os.RemoteException;
@@ -52,16 +54,17 @@ import android.util.Log;
 import android.util.Pair;
 
 import java.net.InetAddress;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * Encapsulate the management of DNS settings for networks.
@@ -382,15 +385,14 @@ public class DnsManager {
         paramsParcel.domains = getDomainStrings(lp.getDomains());
         paramsParcel.tlsName = strictMode ? privateDnsCfg.hostname : "";
         paramsParcel.tlsServers =
-                strictMode ? makeStrings(
-                        Arrays.stream(privateDnsCfg.ips)
-                              .filter((ip) -> lp.isReachable(ip))
-                              .collect(Collectors.toList()))
+                strictMode ? makeStrings(getReachableAddressList(privateDnsCfg.ips, lp))
                 : useTls ? paramsParcel.servers  // Opportunistic
                 : new String[0];            // Off
         paramsParcel.transportTypes = nc.getTransportTypes();
         paramsParcel.meteredNetwork = nc.isMetered();
         paramsParcel.interfaceNames = lp.getAllInterfaceNames().toArray(new String[0]);
+        paramsParcel.dohParams = makeDohParamsParcel(privateDnsCfg, lp);
+
         // Prepare to track the validation status of the DNS servers in the
         // resolver config when private DNS is in opportunistic or strict mode.
         if (useTls) {
@@ -403,21 +405,11 @@ public class DnsManager {
             mPrivateDnsValidationMap.remove(netId);
         }
 
-        Log.d(TAG, String.format("sendDnsConfigurationForNetwork(%d, %s, %s, %d, %d, %d, %d, "
-                + "%d, %d, %s, %s, %s, %b, %s)", paramsParcel.netId,
-                Arrays.toString(paramsParcel.servers), Arrays.toString(paramsParcel.domains),
-                paramsParcel.sampleValiditySeconds, paramsParcel.successThreshold,
-                paramsParcel.minSamples, paramsParcel.maxSamples, paramsParcel.baseTimeoutMsec,
-                paramsParcel.retryCount, paramsParcel.tlsName,
-                Arrays.toString(paramsParcel.tlsServers),
-                Arrays.toString(paramsParcel.transportTypes), paramsParcel.meteredNetwork,
-                Arrays.toString(paramsParcel.interfaceNames)));
-
+        Log.d(TAG, "sendDnsConfigurationForNetwork(" + paramsParcel + ")");
         try {
             mDnsResolver.setResolverConfiguration(paramsParcel);
         } catch (RemoteException | ServiceSpecificException e) {
             Log.e(TAG, "Error setting DNS configuration: " + e);
-            return;
         }
     }
 
@@ -497,5 +489,30 @@ public class DnsManager {
 
     private static String[] getDomainStrings(String domains) {
         return (TextUtils.isEmpty(domains)) ? new String[0] : domains.split(" ");
+    }
+
+    @NonNull
+    private List<InetAddress> getReachableAddressList(@NonNull InetAddress[] ips,
+            @NonNull LinkProperties lp) {
+        final ArrayList<InetAddress> out = new ArrayList<InetAddress>(Arrays.asList(ips));
+        out.removeIf(ip -> !lp.isReachable(ip));
+        return out;
+    }
+
+    @Nullable
+    private DohParamsParcel makeDohParamsParcel(@NonNull PrivateDnsConfig cfg,
+            @NonNull LinkProperties lp) {
+        if (!cfg.ddrEnabled) {
+            return null;
+        }
+        if (cfg.mode == PRIVATE_DNS_MODE_OFF) {
+            return new DohParamsParcel.Builder().build();
+        }
+        return new DohParamsParcel.Builder()
+                .setName(cfg.dohName)
+                .setIps(makeStrings(getReachableAddressList(cfg.dohIps, lp)))
+                .setDohpath(cfg.dohPath)
+                .setPort(cfg.dohPort)
+                .build();
     }
 }

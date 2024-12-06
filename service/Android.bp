@@ -161,7 +161,7 @@ java_library {
     ],
     libs: [
         "framework-annotations-lib",
-        "framework-configinfrastructure",
+        "framework-configinfrastructure.stubs.module_lib",
         "framework-connectivity-pre-jarjar",
         // The framework-connectivity-t library is only available on T+ platforms
         // so any calls to it must be protected with a check to ensure that it is
@@ -175,12 +175,12 @@ java_library {
         // TODO: figure out why just using "framework-tethering" uses the stubs, even though both
         // service-connectivity and framework-tethering are in the same APEX.
         "framework-tethering.impl",
-        "framework-wifi",
+        "framework-wifi.stubs.module_lib",
         "unsupportedappusage",
         "ServiceConnectivityResources",
-        "framework-statsd",
-        "framework-permission",
-        "framework-permission-s",
+        "framework-statsd.stubs.module_lib",
+        "framework-permission.stubs.module_lib",
+        "framework-permission-s.stubs.module_lib",
     ],
     static_libs: [
         // Do not add libs here if they are already included
@@ -190,18 +190,12 @@ java_library {
         "connectivity_native_aidl_interface-lateststable-java",
         "dnsresolver_aidl_interface-V15-java",
         "modules-utils-shell-command-handler",
-        "net-utils-device-common",
-        "net-utils-device-common-ip",
-        "net-utils-device-common-netlink",
-        "net-utils-services-common",
+        "net-utils-service-connectivity",
         "netd-client",
         "networkstack-client",
         "PlatformProperties",
         "service-connectivity-protos",
         "service-connectivity-stats-protos",
-        // The required dependency net-utils-device-common-struct-base is in the classpath via
-        // framework-connectivity
-        "net-utils-device-common-struct",
     ],
     apex_available: [
         "com.android.tethering",
@@ -212,6 +206,7 @@ java_library {
     },
     visibility: [
         "//packages/modules/Connectivity/service-t",
+        "//packages/modules/Connectivity/networksecurity:__subpackages__",
         "//packages/modules/Connectivity/tests:__subpackages__",
         "//packages/modules/Connectivity/thread/service:__subpackages__",
         "//packages/modules/Connectivity/thread/tests:__subpackages__",
@@ -253,6 +248,7 @@ java_defaults {
         "service-connectivity-pre-jarjar",
         "service-connectivity-tiramisu-pre-jarjar",
         "service-nearby-pre-jarjar",
+        "service-networksecurity-pre-jarjar",
         service_remoteauth_pre_jarjar_lib,
         "service-thread-pre-jarjar",
     ],
@@ -268,10 +264,10 @@ java_defaults {
         "framework-connectivity.impl",
         "framework-connectivity-t.impl",
         "framework-tethering.impl",
-        "framework-wifi",
+        "framework-wifi.stubs.module_lib",
         "libprotobuf-java-nano",
-        "framework-permission",
-        "framework-permission-s",
+        "framework-permission.stubs.module_lib",
+        "framework-permission-s.stubs.module_lib",
     ],
     jarjar_rules: ":connectivity-jarjar-rules",
     apex_available: [
@@ -321,6 +317,7 @@ genrule {
         ":framework-connectivity-jarjar-rules",
         ":service-connectivity-jarjar-gen",
         ":service-nearby-jarjar-gen",
+        ":service-networksecurity-jarjar-gen",
         ":service-remoteauth-jarjar-gen",
         ":service-thread-jarjar-gen",
     ],
@@ -405,6 +402,24 @@ java_genrule {
     cmd: "$(location jarjar-rules-generator) " +
         "$(location :service-thread-pre-jarjar{.jar}) " +
         "--prefix com.android.server.thread " +
+        "--excludes $(location jarjar-excludes.txt) " +
+        "--output $(out)",
+    visibility: ["//visibility:private"],
+}
+
+java_genrule {
+    name: "service-networksecurity-jarjar-gen",
+    tool_files: [
+        ":service-networksecurity-pre-jarjar{.jar}",
+        "jarjar-excludes.txt",
+    ],
+    tools: [
+        "jarjar-rules-generator",
+    ],
+    out: ["service_ct_jarjar_rules.txt"],
+    cmd: "$(location jarjar-rules-generator) " +
+        "$(location :service-networksecurity-pre-jarjar{.jar}) " +
+        "--prefix com.android.server.net.ct " +
         "--excludes $(location jarjar-excludes.txt) " +
         "--output $(out)",
     visibility: ["//visibility:private"],

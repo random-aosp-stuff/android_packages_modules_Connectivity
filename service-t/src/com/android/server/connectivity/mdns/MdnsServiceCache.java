@@ -16,10 +16,10 @@
 
 package com.android.server.connectivity.mdns;
 
+import static com.android.net.module.util.DnsUtils.equalsIgnoreDnsCase;
+import static com.android.net.module.util.DnsUtils.toDnsUpperCase;
 import static com.android.server.connectivity.mdns.MdnsResponse.EXPIRATION_NEVER;
 import static com.android.server.connectivity.mdns.util.MdnsUtils.ensureRunningOnHandlerThread;
-import static com.android.server.connectivity.mdns.util.MdnsUtils.equalsIgnoreDnsCase;
-import static com.android.server.connectivity.mdns.util.MdnsUtils.toDnsLowerCase;
 
 import static java.lang.Math.min;
 
@@ -32,6 +32,7 @@ import android.util.ArrayMap;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.connectivity.mdns.util.MdnsUtils;
 
+import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -48,17 +49,17 @@ import java.util.Objects;
  *  to their default value (0, false or null).
  */
 public class MdnsServiceCache {
-    static class CacheKey {
-        @NonNull final String mLowercaseServiceType;
+    public static class CacheKey {
+        @NonNull final String mUpperCaseServiceType;
         @NonNull final SocketKey mSocketKey;
 
         CacheKey(@NonNull String serviceType, @NonNull SocketKey socketKey) {
-            mLowercaseServiceType = toDnsLowerCase(serviceType);
+            mUpperCaseServiceType = toDnsUpperCase(serviceType);
             mSocketKey = socketKey;
         }
 
         @Override public int hashCode() {
-            return Objects.hash(mLowercaseServiceType, mSocketKey);
+            return Objects.hash(mUpperCaseServiceType, mSocketKey);
         }
 
         @Override public boolean equals(Object other) {
@@ -68,8 +69,13 @@ public class MdnsServiceCache {
             if (!(other instanceof CacheKey)) {
                 return false;
             }
-            return Objects.equals(mLowercaseServiceType, ((CacheKey) other).mLowercaseServiceType)
+            return Objects.equals(mUpperCaseServiceType, ((CacheKey) other).mUpperCaseServiceType)
                     && Objects.equals(mSocketKey, ((CacheKey) other).mSocketKey);
+        }
+
+        @Override
+        public String toString() {
+            return "CacheKey{ ServiceType=" + mUpperCaseServiceType + ", " + mSocketKey + " }";
         }
     }
     /**
@@ -233,6 +239,21 @@ public class MdnsServiceCache {
     }
 
     /**
+     * Remove services which matches the given type and socket.
+     *
+     * @param cacheKey the target CacheKey.
+     */
+    public void removeServices(@NonNull CacheKey cacheKey) {
+        ensureRunningOnHandlerThread(mHandler);
+        // Remove all services
+        if (mCachedServices.remove(cacheKey) == null) {
+            return;
+        }
+        // Update the next expiration check time if services are removed.
+        mNextExpirationTime = getNextExpirationTime(mClock.elapsedRealtime());
+    }
+
+    /**
      * Register a callback to listen to service expiration.
      *
      * <p> Registering the same callback instance twice is a no-op, since MdnsServiceTypeClient
@@ -336,6 +357,22 @@ public class MdnsServiceCache {
 
         // Update next expiration time.
         mNextExpirationTime = getNextExpirationTime(now);
+    }
+
+    /**
+     * Dump ServiceCache state.
+     */
+    public void dump(PrintWriter pw, String indent) {
+        ensureRunningOnHandlerThread(mHandler);
+        // IndentingPrintWriter cannot be used on the mDNS stack build. So, manually add an indent.
+        for (int i = 0; i < mCachedServices.size(); i++) {
+            final CacheKey key = mCachedServices.keyAt(i);
+            pw.println(indent + key);
+            for (MdnsResponse response : mCachedServices.valueAt(i)) {
+                pw.println(indent + "  Response{ " + response + " }");
+            }
+            pw.println();
+        }
     }
 
     /*** Callbacks for listening service expiration */

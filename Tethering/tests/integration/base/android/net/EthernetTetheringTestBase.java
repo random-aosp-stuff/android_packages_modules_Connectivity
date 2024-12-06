@@ -16,7 +16,6 @@
 
 package android.net;
 
-import static android.Manifest.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS;
 import static android.Manifest.permission.MANAGE_TEST_NETWORKS;
 import static android.Manifest.permission.NETWORK_SETTINGS;
 import static android.Manifest.permission.TETHER_PRIVILEGED;
@@ -27,7 +26,9 @@ import static android.net.TetheringManager.CONNECTIVITY_SCOPE_LOCAL;
 import static android.net.TetheringManager.TETHERING_ETHERNET;
 import static android.net.TetheringTester.buildTcpPacket;
 import static android.net.TetheringTester.buildUdpPacket;
+import static android.net.TetheringTester.buildUdpPackets;
 import static android.net.TetheringTester.isAddressIpv4;
+import static android.net.TetheringTester.isExpectedFragmentIpPacket;
 import static android.net.TetheringTester.isExpectedIcmpPacket;
 import static android.net.TetheringTester.isExpectedTcpPacket;
 import static android.net.TetheringTester.isExpectedUdpPacket;
@@ -42,7 +43,6 @@ import static com.android.testutils.TestPermissionUtil.runAsShell;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.junit.Assume.assumeFalse;
@@ -60,13 +60,14 @@ import android.net.cts.util.CtsNetUtils;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
+import android.util.ArrayMap;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.test.platform.app.InstrumentationRegistry;
 
-import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.Struct;
+import com.android.net.module.util.structs.FragmentHeader;
 import com.android.net.module.util.structs.Ipv6Header;
 import com.android.testutils.HandlerUtils;
 import com.android.testutils.TapPacketReader;
@@ -105,7 +106,7 @@ public abstract class EthernetTetheringTestBase {
     // Used to check if any tethering interface is available. Choose 200ms to be request timeout
     // because the average interface requested time on cuttlefish@acloud is around 10ms.
     // See TetheredInterfaceRequester.getInterface, isInterfaceForTetheringAvailable.
-    private static final int AVAILABLE_TETHER_IFACE_REQUEST_TIMEOUT_MS = 200;
+    private static final int SHORT_TIMEOUT_MS = 1000;
     private static final int TETHER_REACHABILITY_ATTEMPTS = 20;
     protected static final long WAIT_RA_TIMEOUT_MS = 2000;
 
@@ -154,7 +155,7 @@ public abstract class EthernetTetheringTestBase {
     private boolean mRunTests;
     private HandlerThread mHandlerThread;
     private Handler mHandler;
-    private TetheredInterfaceRequester mTetheredInterfaceRequester;
+    protected TetheredInterfaceRequester mTetheredInterfaceRequester;
 
     // Late initialization in initTetheringTester().
     private TapPacketReader mUpstreamReader;
@@ -245,12 +246,14 @@ public abstract class EthernetTetheringTestBase {
         maybeUnregisterTetheringEventCallback(mTetheringEventCallback);
         mTetheringEventCallback = null;
 
-        runAsShell(NETWORK_SETTINGS, () -> mTetheredInterfaceRequester.release());
         setIncludeTestInterfaces(false);
     }
 
     @After
     public void tearDown() throws Exception {
+        if (mTetheredInterfaceRequester != null) {
+            mTetheredInterfaceRequester.release();
+        }
         try {
             if (mRunTests) cleanUp();
         } finally {
@@ -263,33 +266,17 @@ public abstract class EthernetTetheringTestBase {
         }
     }
 
-    protected static boolean isInterfaceForTetheringAvailable() throws Exception {
-        // Before T, all ethernet interfaces could be used for server mode. Instead of
-        // waiting timeout, just checking whether the system currently has any
-        // ethernet interface is more reliable.
-        if (!SdkLevel.isAtLeastT()) {
-            return runAsShell(CONNECTIVITY_USE_RESTRICTED_NETWORKS, () -> sEm.isAvailable());
-        }
-
+    protected boolean isInterfaceForTetheringAvailable() throws Exception {
         // If previous test case doesn't release tethering interface successfully, the other tests
         // after that test may be skipped as unexcepted.
         // TODO: figure out a better way to check default tethering interface existenion.
-        final TetheredInterfaceRequester requester = new TetheredInterfaceRequester();
-        try {
-            // Use short timeout (200ms) for requesting an existing interface, if any, because
-            // it should reurn faster than requesting a new tethering interface. Using default
-            // timeout (5000ms, TIMEOUT_MS) may make that total testing time is over 1 minute
-            // test module timeout on internal testing.
-            // TODO: if this becomes flaky, consider using default timeout (5000ms) and moving
-            // this check into #setUpOnce.
-            return requester.getInterface(AVAILABLE_TETHER_IFACE_REQUEST_TIMEOUT_MS) != null;
-        } catch (TimeoutException e) {
-            return false;
-        } finally {
-            runAsShell(NETWORK_SETTINGS, () -> {
-                requester.release();
-            });
-        }
+        // Use short timeout (200ms) for requesting an existing interface, if any, because
+        // it should reurn faster than requesting a new tethering interface. Using default
+        // timeout (5000ms, TIMEOUT_MS) may make that total testing time is over 1 minute
+        // test module timeout on internal testing.
+        // TODO: if this becomes flaky, consider using default timeout (5000ms) and moving
+        // this check into #setUpOnce.
+        return mTetheredInterfaceRequester.isPhysicalInterfaceAvailable(SHORT_TIMEOUT_MS);
     }
 
     protected static void setIncludeTestInterfaces(boolean include) {
@@ -302,14 +289,6 @@ public abstract class EthernetTetheringTestBase {
         runAsShell(NETWORK_SETTINGS, () -> {
             sTm.setPreferTestNetworks(prefer);
         });
-    }
-
-    protected String getTetheredInterface() throws Exception {
-        return mTetheredInterfaceRequester.getInterface();
-    }
-
-    protected CompletableFuture<String> requestTetheredInterface() throws Exception {
-        return mTetheredInterfaceRequester.requestInterface();
     }
 
     protected static void waitForRouterAdvertisement(TapPacketReader reader, String iface,
@@ -589,6 +568,12 @@ public abstract class EthernetTetheringTestBase {
         return nif.getMTU();
     }
 
+    protected int getIndexByName(String ifaceName) throws SocketException {
+        NetworkInterface nif = NetworkInterface.getByName(ifaceName);
+        assertNotNull("Can't get NetworkInterface object for " + ifaceName, nif);
+        return nif.getIndex();
+    }
+
     protected TapPacketReader makePacketReader(final TestNetworkInterface iface) throws Exception {
         FileDescriptor fd = iface.getFileDescriptor().getFileDescriptor();
         return makePacketReader(fd, getMTU(iface));
@@ -605,6 +590,11 @@ public abstract class EthernetTetheringTestBase {
         private TetheredInterfaceRequest mRequest;
         private final CompletableFuture<String> mFuture = new CompletableFuture<>();
 
+        TetheredInterfaceRequester() {
+            mRequest = runAsShell(NETWORK_SETTINGS, () ->
+                    sEm.requestTetheredInterface(c -> c.run() /* executor */, this));
+        }
+
         @Override
         public void onAvailable(String iface) {
             Log.d(TAG, "Ethernet interface available: " + iface);
@@ -616,28 +606,21 @@ public abstract class EthernetTetheringTestBase {
             mFuture.completeExceptionally(new IllegalStateException("onUnavailable received"));
         }
 
-        public CompletableFuture<String> requestInterface() {
-            assertNull("BUG: more than one tethered interface request", mRequest);
-            Log.d(TAG, "Requesting tethered interface");
-            mRequest = runAsShell(NETWORK_SETTINGS, () ->
-                    sEm.requestTetheredInterface(c -> c.run() /* executor */, this));
-            return mFuture;
-        }
-
-        public String getInterface(int timeout) throws Exception {
-            return requestInterface().get(timeout, TimeUnit.MILLISECONDS);
+        public boolean isPhysicalInterfaceAvailable(int timeout) {
+            try {
+                final String iface = mFuture.get(timeout, TimeUnit.MILLISECONDS);
+                return !iface.startsWith("testtap");
+            } catch (Exception e) {
+                return false;
+            }
         }
 
         public String getInterface() throws Exception {
-            return getInterface(TIMEOUT_MS);
+            return mFuture.get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
         }
 
         public void release() {
-            if (mRequest != null) {
-                mFuture.obtrudeException(new IllegalStateException("Request already released"));
-                mRequest.release();
-                mRequest = null;
-            }
+            runAsShell(NETWORK_SETTINGS, () -> mRequest.release());
         }
     }
 
@@ -658,7 +641,10 @@ public abstract class EthernetTetheringTestBase {
         lp.setLinkAddresses(addresses);
         lp.setDnsServers(dnses);
 
-        return runAsShell(MANAGE_TEST_NETWORKS, () -> initTestNetwork(sContext, lp, TIMEOUT_MS));
+        // TODO: initTestNetwork can take up to 15 seconds on a workstation. Investigate when and
+        // why this is the case. It is unclear whether a 30 second timeout is enough when running
+        // these tests in the much slower test infra.
+        return runAsShell(MANAGE_TEST_NETWORKS, () -> initTestNetwork(sContext, lp, 30_000));
     }
 
     protected void sendDownloadPacketUdp(@NonNull final InetAddress srcIp,
@@ -699,6 +685,57 @@ public abstract class EthernetTetheringTestBase {
         tester.verifyUpload(testPacket, p -> {
             Log.d(TAG, "Packet in upstream: " + dumpHexString(p));
             return isExpectedUdpPacket(p, false /* hasEther */, isIpv4, TX_PAYLOAD);
+        });
+    }
+
+    protected void sendDownloadFragmentedUdpPackets(@NonNull final Inet6Address srcIp,
+            @NonNull final Inet6Address dstIp, @NonNull final TetheringTester tester,
+            @NonNull final ByteBuffer payload, int l2mtu) throws Exception {
+        final List<ByteBuffer> testPackets = buildUdpPackets(null /* srcMac */, null /* dstMac */,
+                srcIp, dstIp, REMOTE_PORT, LOCAL_PORT, payload, l2mtu);
+        assertTrue("No packet fragmentation occurs", testPackets.size() > 1);
+
+        short id = 0;
+        final ArrayMap<Short, ByteBuffer> fragmentPayloads = new ArrayMap<>();
+        for (ByteBuffer testPacket : testPackets) {
+            Struct.parse(Ipv6Header.class, testPacket);
+            final FragmentHeader fragmentHeader = Struct.parse(FragmentHeader.class, testPacket);
+            // Conversion of IPv6's fragmentOffset field to IPv4's flagsAndFragmentOffset field.
+            // IPv6 Fragment Header:
+            //   '13 bits of offset in multiples of 8' + 2 zero bits + more fragment bit
+            //      0                   1                   2                   3
+            //      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+            //     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            //     |  Next Header  |   Reserved    |      Fragment Offset    |Res|M|
+            //     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            //     |                         Identification                        |
+            //     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            // IPv4 Header:
+            //   zero bit + don't frag bit + more frag bit + '13 bits of offset in multiples of 8'
+            //      0                   1                   2                   3
+            //      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+            //     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            //     |Version|  IHL  |Type of Service|          Total Length         |
+            //     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            //     |         Identification        |Flags|      Fragment Offset    |
+            //     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            //     +                           . . .                               +
+            //     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            short offset = (short) (((fragmentHeader.fragmentOffset & 0x1) << 13)
+                    | (fragmentHeader.fragmentOffset >> 3));
+            // RFC6145: for fragment id, copied from the low-order 16 bits in the identification
+            //          field in the Fragment Header.
+            id = (short) (fragmentHeader.identification & 0xffff);
+            final byte[] fragmentPayload = new byte[testPacket.remaining()];
+            testPacket.get(fragmentPayload);
+            testPacket.flip();
+            fragmentPayloads.put(offset, ByteBuffer.wrap(fragmentPayload));
+        }
+
+        final short fragId = id;
+        tester.verifyDownloadBatch(testPackets, p -> {
+            Log.d(TAG, "Packet in downstream: " + dumpHexString(p));
+            return isExpectedFragmentIpPacket(p, fragId, fragmentPayloads);
         });
     }
 
@@ -935,6 +972,11 @@ public abstract class EthernetTetheringTestBase {
 
         // Above has guaranteed that the found packet is an IPv6 packet without ether header.
         return Struct.parse(Ipv6Header.class, ByteBuffer.wrap(expectedPacket)).srcIp;
+    }
+
+    protected String getUpstreamInterfaceName() {
+        if (mUpstreamTracker == null) return null;
+        return mUpstreamTracker.getTestIface().getInterfaceName();
     }
 
     protected <T> List<T> toList(T... array) {

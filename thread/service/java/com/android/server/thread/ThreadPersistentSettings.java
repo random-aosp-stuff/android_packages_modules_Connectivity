@@ -18,16 +18,18 @@ package com.android.server.thread;
 
 import static com.android.net.module.util.DeviceConfigUtils.TETHERING_MODULE_NAME;
 
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.ApexEnvironment;
 import android.content.Context;
+import android.net.thread.ThreadConfiguration;
 import android.os.PersistableBundle;
 import android.util.AtomicFile;
-import android.util.Log;
 
 import com.android.connectivity.resources.R;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.net.module.util.SharedLog;
 import com.android.server.connectivity.ConnectivityResources;
 
 import java.io.ByteArrayInputStream;
@@ -46,6 +48,7 @@ import java.io.InputStream;
  */
 public class ThreadPersistentSettings {
     private static final String TAG = "ThreadPersistentSettings";
+    private static final SharedLog LOG = ThreadNetworkLogger.forSubComponent(TAG);
 
     /** File name used for storing settings. */
     private static final String FILE_NAME = "ThreadPersistentSettings.xml";
@@ -73,6 +76,16 @@ public class ThreadPersistentSettings {
 
     /** Stores the Thread country code, null if no country code is stored. */
     public static final Key<String> THREAD_COUNTRY_CODE = new Key<>("thread_country_code", null);
+
+    /** Stores the Thread NAT64 feature toggle state, true for enabled and false for disabled. */
+    private static final Key<Boolean> CONFIG_NAT64_ENABLED =
+            new Key<>("config_nat64_enabled", false);
+
+    /**
+     * Stores the Thread DHCPv6-PD feature toggle state, true for enabled and false for disabled.
+     */
+    private static final Key<Boolean> CONFIG_DHCP6_PD_ENABLED =
+            new Key<>("config_dhcp6_pd_enabled", false);
 
     /******** Thread persistent setting keys ***************/
 
@@ -103,7 +116,7 @@ public class ThreadPersistentSettings {
         readFromStoreFile();
         synchronized (mLock) {
             if (!mSettings.containsKey(THREAD_ENABLED.key)) {
-                Log.i(TAG, "\"thread_enabled\" is missing in settings file, using default value");
+                LOG.i("\"thread_enabled\" is missing in settings file, using default value");
                 put(
                         THREAD_ENABLED.key,
                         mResources.get().getBoolean(R.bool.config_thread_default_enabled));
@@ -175,6 +188,30 @@ public class ThreadPersistentSettings {
     }
 
     /**
+     * Store a {@link ThreadConfiguration} to the persistent settings.
+     *
+     * @param configuration {@link ThreadConfiguration} to be stored.
+     * @return {@code true} if the configuration was changed, {@code false} otherwise.
+     */
+    public boolean putConfiguration(@NonNull ThreadConfiguration configuration) {
+        if (getConfiguration().equals(configuration)) {
+            return false;
+        }
+        putObject(CONFIG_NAT64_ENABLED.key, configuration.isNat64Enabled());
+        putObject(CONFIG_DHCP6_PD_ENABLED.key, configuration.isDhcpv6PdEnabled());
+        writeToStoreFile();
+        return true;
+    }
+
+    /** Retrieve the {@link ThreadConfiguration} from the persistent settings. */
+    public ThreadConfiguration getConfiguration() {
+        return new ThreadConfiguration.Builder()
+                .setNat64Enabled(get(CONFIG_NAT64_ENABLED))
+                .setDhcpv6PdEnabled(get(CONFIG_DHCP6_PD_ENABLED))
+                .build();
+    }
+
+    /**
      * Base class to store string key and its default value.
      *
      * @param <T> Type of the value.
@@ -207,7 +244,7 @@ public class ThreadPersistentSettings {
                 writeToAtomicFile(mAtomicFile, outputStream.toByteArray());
             }
         } catch (IOException e) {
-            Log.wtf(TAG, "Write to store file failed", e);
+            LOG.wtf("Write to store file failed", e);
         }
     }
 
@@ -215,7 +252,7 @@ public class ThreadPersistentSettings {
         try {
             final byte[] readData;
             synchronized (mLock) {
-                Log.i(TAG, "Reading from store file: " + mAtomicFile.getBaseFile());
+                LOG.i("Reading from store file: " + mAtomicFile.getBaseFile());
                 readData = readFromAtomicFile(mAtomicFile);
             }
             final ByteArrayInputStream inputStream = new ByteArrayInputStream(readData);
@@ -226,9 +263,9 @@ public class ThreadPersistentSettings {
                 mSettings.putAll(bundleRead);
             }
         } catch (FileNotFoundException e) {
-            Log.w(TAG, "No store file to read", e);
+            LOG.w("No store file to read " + e.getMessage());
         } catch (IOException e) {
-            Log.e(TAG, "Read from store file failed", e);
+            LOG.e("Read from store file failed", e);
         }
     }
 

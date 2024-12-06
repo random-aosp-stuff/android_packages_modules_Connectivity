@@ -25,6 +25,7 @@
     <option name="config-descriptor:metadata" key="mainline-param" value="com.google.android.tethering.apex" />
     <option name="not-shardable" value="true" />
     <target_preparer class="com.android.compatibility.common.tradefed.targetprep.DynamicConfigPusher">
+        <option name="has-server-side-config" value="false" />
         <option name="target" value="device" />
         <option name="config-filename" value="{MODULE}" />
         <option name="version" value="1.0" />
@@ -48,8 +49,8 @@
              those tests with an annotation matching the name of the APK.
 
              This allows us to maintain one AndroidTestTemplate.xml for all CtsNetTestCases*.apk,
-             and have CtsNetTestCases and CtsNetTestCasesLatestSdk run all tests, but have
-             CtsNetTestCasesMaxTargetSdk31 run only tests that require target SDK 31.
+             and have CtsNetTestCases run all tests, but have CtsNetTestCasesMaxTargetSdk31 run only
+             tests that require target SDK 31.
 
              This relies on the fact that if the class specified in include-annotation exists, then
              the runner will only run the tests annotated with that annotation, but if it does not,

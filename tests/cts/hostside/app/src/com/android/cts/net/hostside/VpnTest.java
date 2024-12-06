@@ -20,8 +20,11 @@ import static android.Manifest.permission.MANAGE_TEST_NETWORKS;
 import static android.Manifest.permission.NETWORK_SETTINGS;
 import static android.Manifest.permission.READ_DEVICE_CONFIG;
 import static android.Manifest.permission.WRITE_DEVICE_CONFIG;
+import static android.content.Context.RECEIVER_EXPORTED;
 import static android.content.pm.PackageManager.FEATURE_TELEPHONY;
 import static android.content.pm.PackageManager.FEATURE_WIFI;
+import static android.net.ConnectivityManager.BLOCKED_REASON_LOCKDOWN_VPN;
+import static android.net.ConnectivityManager.BLOCKED_REASON_NONE;
 import static android.net.ConnectivityManager.FIREWALL_CHAIN_BACKGROUND;
 import static android.net.ConnectivityManager.TYPE_VPN;
 import static android.net.NetworkCapabilities.TRANSPORT_TEST;
@@ -46,11 +49,7 @@ import static com.android.cts.net.hostside.VpnTest.TestSocketKeepaliveCallback.C
 import static com.android.cts.net.hostside.VpnTest.TestSocketKeepaliveCallback.CallbackType.ON_RESUMED;
 import static com.android.cts.net.hostside.VpnTest.TestSocketKeepaliveCallback.CallbackType.ON_STARTED;
 import static com.android.cts.net.hostside.VpnTest.TestSocketKeepaliveCallback.CallbackType.ON_STOPPED;
-import static com.android.networkstack.apishim.ConstantsShim.BLOCKED_REASON_LOCKDOWN_VPN;
-import static com.android.networkstack.apishim.ConstantsShim.BLOCKED_REASON_NONE;
-import static com.android.networkstack.apishim.ConstantsShim.RECEIVER_EXPORTED;
 import static com.android.testutils.Cleanup.testAndCleanup;
-import static com.android.testutils.DevSdkIgnoreRuleKt.SC_V2;
 import static com.android.testutils.RecorderCallback.CallbackEntry.BLOCKED_STATUS_INT;
 import static com.android.testutils.TestPermissionUtil.runAsShell;
 
@@ -213,6 +212,8 @@ public class VpnTest {
 
     private static final String AUTOMATIC_ON_OFF_KEEPALIVE_VERSION =
                 "automatic_on_off_keepalive_version";
+    private static final String INGRESS_TO_VPN_ADDRESS_FILTERING =
+            "ingress_to_vpn_address_filtering";
     // Enabled since version 1 means it's always enabled because the version is always above 1
     private static final String AUTOMATIC_ON_OFF_KEEPALIVE_ENABLED = "1";
     private static final long TEST_TCP_POLLING_TIMER_EXPIRED_PERIOD_MS = 60_000L;
@@ -890,7 +891,7 @@ public class VpnTest {
                 entry -> entry.getCaps().hasTransport(TRANSPORT_VPN));
     }
 
-    @Test @IgnoreUpTo(SC_V2) // TODO: Use to Build.VERSION_CODES.SC_V2 when available
+    @Test @IgnoreUpTo(Build.VERSION_CODES.S_V2)
     public void testChangeUnderlyingNetworks() throws Exception {
         assumeTrue(mPackageManager.hasSystemFeature(FEATURE_WIFI));
         assumeTrue(mPackageManager.hasSystemFeature(FEATURE_TELEPHONY));
@@ -995,6 +996,13 @@ public class VpnTest {
                             FIREWALL_CHAIN_BACKGROUND));
             otherUidCallback.expectAvailableCallbacks(defaultNetwork, false /* suspended */,
                     true /* validated */, isOtherUidBlocked, TIMEOUT_MS);
+        } else {
+            // R does not have per-UID callback or system default callback APIs, and sends an
+            // additional CAP_CHANGED callback.
+            registerDefaultNetworkCallback(myUidCallback);
+            myUidCallback.expectAvailableCallbacks(defaultNetwork, false /* suspended */,
+                    true /* validated */, false /* blocked */, TIMEOUT_MS);
+            myUidCallback.expect(CallbackEntry.NETWORK_CAPS_UPDATED, defaultNetwork);
         }
 
         FileDescriptor fd = openSocketFdInOtherApp(TEST_HOST, 80, TIMEOUT_MS);
@@ -1136,12 +1144,12 @@ public class VpnTest {
         return null;
     }
 
-    @Test
+    @Test @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)  // Automatic keepalives were added in U.
     public void testAutomaticOnOffKeepaliveModeNoClose() throws Exception {
         doTestAutomaticOnOffKeepaliveMode(false);
     }
 
-    @Test
+    @Test @IgnoreUpTo(Build.VERSION_CODES.TIRAMISU)  // Automatic keepalives were added in U.
     public void testAutomaticOnOffKeepaliveModeClose() throws Exception {
         doTestAutomaticOnOffKeepaliveMode(true);
     }
@@ -1707,7 +1715,8 @@ public class VpnTest {
     }
 
     private void maybeExpectVpnTransportInfo(Network network) {
-        assumeTrue(SdkLevel.isAtLeastS());
+        // VpnTransportInfo was only added in S.
+        if (!SdkLevel.isAtLeastS()) return;
         final NetworkCapabilities vpnNc = mCM.getNetworkCapabilities(network);
         assertTrue(vpnNc.hasTransport(TRANSPORT_VPN));
         final TransportInfo ti = vpnNc.getTransportInfo();
@@ -1949,6 +1958,9 @@ public class VpnTest {
      */
     private void doTestDropPacketToVpnAddress(final boolean duplicatedAddress)
             throws Exception {
+        assumeTrue(mCM.isConnectivityServiceFeatureEnabledForTesting(
+                INGRESS_TO_VPN_ADDRESS_FILTERING));
+
         final NetworkRequest request = new NetworkRequest.Builder()
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_TRUSTED)

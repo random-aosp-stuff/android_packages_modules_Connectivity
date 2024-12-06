@@ -25,8 +25,6 @@ import static android.net.NetworkStats.SET_DEFAULT;
 import static android.net.NetworkStats.TAG_NONE;
 import static android.net.NetworkStats.UID_ALL;
 import static android.net.NetworkStats.UID_TETHERING;
-import static android.net.TetheringManager.TETHERING_WIFI;
-import static android.net.ip.IpServer.STATE_TETHERED;
 import static android.net.netstats.provider.NetworkStatsProvider.QUOTA_UNLIMITED;
 import static android.system.OsConstants.ETH_P_IP;
 import static android.system.OsConstants.ETH_P_IPV6;
@@ -50,6 +48,7 @@ import static com.android.net.module.util.netlink.NetlinkConstants.RTM_NEWNEIGH;
 import static com.android.net.module.util.netlink.StructNdMsg.NUD_FAILED;
 import static com.android.net.module.util.netlink.StructNdMsg.NUD_REACHABLE;
 import static com.android.net.module.util.netlink.StructNdMsg.NUD_STALE;
+import static com.android.networkstack.tethering.BpfCoordinator.CONNTRACK_METRICS_UPDATE_INTERVAL_MS;
 import static com.android.networkstack.tethering.BpfCoordinator.CONNTRACK_TIMEOUT_UPDATE_INTERVAL_MS;
 import static com.android.networkstack.tethering.BpfCoordinator.INVALID_MTU;
 import static com.android.networkstack.tethering.BpfCoordinator.NF_CONNTRACK_TCP_TIMEOUT_ESTABLISHED;
@@ -62,6 +61,7 @@ import static com.android.networkstack.tethering.BpfCoordinator.toIpv4MappedAddr
 import static com.android.networkstack.tethering.BpfUtils.DOWNSTREAM;
 import static com.android.networkstack.tethering.BpfUtils.UPSTREAM;
 import static com.android.networkstack.tethering.TetheringConfiguration.DEFAULT_TETHER_OFFLOAD_POLL_INTERVAL_MS;
+import static com.android.networkstack.tethering.TetheringConfiguration.TETHER_ACTIVE_SESSIONS_METRICS;
 import static com.android.testutils.MiscAsserts.assertSameElements;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -79,9 +79,7 @@ import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.spy;
@@ -91,6 +89,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import android.app.usage.NetworkStatsManager;
+import android.content.Context;
 import android.net.INetd;
 import android.net.InetAddresses;
 import android.net.IpPrefix;
@@ -100,11 +99,9 @@ import android.net.MacAddress;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkStats;
-import android.net.RoutingCoordinatorManager;
 import android.net.TetherOffloadRuleParcel;
 import android.net.TetherStatsParcel;
 import android.net.ip.IpServer;
-import android.net.ip.RouterAdvertisementDaemon;
 import android.os.Build;
 import android.os.Handler;
 import android.os.test.TestLooper;
@@ -119,12 +116,10 @@ import androidx.test.runner.AndroidJUnit4;
 
 import com.android.dx.mockito.inline.extended.ExtendedMockito;
 import com.android.internal.util.IndentingPrintWriter;
-import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.CollectionUtils;
 import com.android.net.module.util.IBpfMap;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.NetworkStackConstants;
-import com.android.net.module.util.SdkUtil.LateSdk;
 import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.Struct.S32;
 import com.android.net.module.util.bpf.Tether4Key;
@@ -143,13 +138,13 @@ import com.android.networkstack.tethering.BpfCoordinator.BpfConntrackEventConsum
 import com.android.networkstack.tethering.BpfCoordinator.ClientInfo;
 import com.android.networkstack.tethering.BpfCoordinator.Ipv6DownstreamRule;
 import com.android.networkstack.tethering.BpfCoordinator.Ipv6UpstreamRule;
-import com.android.networkstack.tethering.metrics.TetheringMetrics;
-import com.android.networkstack.tethering.util.InterfaceSet;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreAfter;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
 import com.android.testutils.TestBpfMap;
 import com.android.testutils.TestableNetworkStatsProviderCbBinder;
+import com.android.testutils.com.android.testutils.SetFeatureFlagsRule;
+import com.android.testutils.com.android.testutils.SetFeatureFlagsRule.FeatureFlag;
 
 import org.junit.Before;
 import org.junit.Rule;
@@ -181,6 +176,16 @@ public class BpfCoordinatorTest {
     @Rule
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
 
+    final HashMap<String, Boolean> mFeatureFlags = new HashMap<>();
+    // This will set feature flags from @FeatureFlag annotations
+    // into the map before setUp() runs.
+    @Rule
+    public final SetFeatureFlagsRule mSetFeatureFlagsRule =
+            new SetFeatureFlagsRule((name, enabled) -> {
+                mFeatureFlags.put(name, enabled);
+                return null;
+            }, (name) -> mFeatureFlags.getOrDefault(name, false));
+
     private static final boolean IPV4 = true;
     private static final boolean IPV6 = false;
 
@@ -209,11 +214,6 @@ public class BpfCoordinatorTest {
     private static final MacAddress MAC_B = MacAddress.fromString("11:22:33:00:00:0b");
     private static final MacAddress MAC_NULL = MacAddress.fromString("00:00:00:00:00:00");
 
-    private static final LinkAddress UPSTREAM_ADDRESS = new LinkAddress("2001:db8:0:1234::168/64");
-    private static final LinkAddress UPSTREAM_ADDRESS2 = new LinkAddress("2001:db8:0:abcd::168/64");
-    private static final Set<LinkAddress> UPSTREAM_ADDRESSES = Set.of(UPSTREAM_ADDRESS);
-    private static final Set<LinkAddress> UPSTREAM_ADDRESSES2 =
-            Set.of(UPSTREAM_ADDRESS, UPSTREAM_ADDRESS2);
     private static final IpPrefix UPSTREAM_PREFIX = new IpPrefix("2001:db8:0:1234::/64");
     private static final IpPrefix UPSTREAM_PREFIX2 = new IpPrefix("2001:db8:0:abcd::/64");
     private static final Set<IpPrefix> UPSTREAM_PREFIXES = Set.of(UPSTREAM_PREFIX);
@@ -421,6 +421,11 @@ public class BpfCoordinatorTest {
                 return this;
             }
 
+            public Builder setPrivateAddress(Inet4Address privateAddr) {
+                mPrivateAddr = privateAddr;
+                return this;
+            }
+
             public Builder setRemotePort(int remotePort) {
                 mRemotePort = (short) remotePort;
                 return this;
@@ -444,18 +449,12 @@ public class BpfCoordinatorTest {
 
     @Mock private NetworkStatsManager mStatsManager;
     @Mock private INetd mNetd;
+    @Mock private Context mMockContext;
     @Mock private IpServer mIpServer;
     @Mock private IpServer mIpServer2;
     @Mock private TetheringConfiguration mTetherConfig;
     @Mock private ConntrackMonitor mConntrackMonitor;
     @Mock private IpNeighborMonitor mIpNeighborMonitor;
-    @Mock private RouterAdvertisementDaemon mRaDaemon;
-    @Mock private IpServer.Dependencies mIpServerDeps;
-    @Mock private IpServer.Callback mIpServerCallback;
-    @Mock private PrivateAddressCoordinator mAddressCoordinator;
-    private final LateSdk<RoutingCoordinatorManager> mRoutingCoordinatorManager =
-            new LateSdk<>(SdkLevel.isAtLeastS() ? mock(RoutingCoordinatorManager.class) : null);
-    @Mock private TetheringMetrics mTetheringMetrics;
 
     // Late init since methods must be called by the thread that created this object.
     private TestableNetworkStatsProviderCbBinder mTetherStatsProviderCb;
@@ -494,6 +493,11 @@ public class BpfCoordinatorTest {
                     @NonNull
                     public Handler getHandler() {
                         return mHandler;
+                    }
+
+                    @NonNull
+                    public Context getContext() {
+                        return mMockContext;
                     }
 
                     @NonNull
@@ -568,29 +572,23 @@ public class BpfCoordinatorTest {
                     public IBpfMap<S32, S32> getBpfErrorMap() {
                         return mBpfErrorMap;
                     }
+
+                    @Override
+                    public void sendTetheringActiveSessionsReported(int lastMaxSessionCount) {
+                        // No-op.
+                    }
+
+                    @Override
+                    public boolean isFeatureEnabled(Context context, String name) {
+                        return mFeatureFlags.getOrDefault(name, false);
+                    }
             });
 
     @Before public void setUp() {
         MockitoAnnotations.initMocks(this);
         when(mTetherConfig.isBpfOffloadEnabled()).thenReturn(true /* default value */);
-
-        // Simulate the behavior of RoutingCoordinator
-        if (null != mRoutingCoordinatorManager.value) {
-            doAnswer(it -> {
-                final String fromIface = (String) it.getArguments()[0];
-                final String toIface = (String) it.getArguments()[1];
-                mNetd.tetherAddForward(fromIface, toIface);
-                mNetd.ipfwdAddInterfaceForward(fromIface, toIface);
-                return null;
-            }).when(mRoutingCoordinatorManager.value).addInterfaceForward(any(), any());
-            doAnswer(it -> {
-                final String fromIface = (String) it.getArguments()[0];
-                final String toIface = (String) it.getArguments()[1];
-                mNetd.ipfwdRemoveInterfaceForward(fromIface, toIface);
-                mNetd.tetherRemoveForward(fromIface, toIface);
-                return null;
-            }).when(mRoutingCoordinatorManager.value).removeInterfaceForward(any(), any());
-        }
+        when(mIpServer.getInterfaceParams()).thenReturn(DOWNSTREAM_IFACE_PARAMS);
+        when(mIpServer2.getInterfaceParams()).thenReturn(DOWNSTREAM_IFACE_PARAMS2);
     }
 
     private void waitForIdle() {
@@ -603,70 +601,39 @@ public class BpfCoordinatorTest {
         when(mNetd.tetherOffloadGetStats()).thenReturn(new TetherStatsParcel[0]);
     }
 
-    @NonNull
-    private IpServer makeAndStartIpServer(String interfaceName, BpfCoordinator bpfCoordinator)
-            throws Exception {
-        final LinkAddress testAddress = new LinkAddress("192.168.42.5/24");
-        when(mIpServerDeps.getRouterAdvertisementDaemon(any())).thenReturn(mRaDaemon);
-        when(mIpServerDeps.getInterfaceParams(DOWNSTREAM_IFACE)).thenReturn(
-                DOWNSTREAM_IFACE_PARAMS);
-        when(mIpServerDeps.getInterfaceParams(UPSTREAM_IFACE)).thenReturn(UPSTREAM_IFACE_PARAMS);
-        when(mIpServerDeps.getInterfaceParams(UPSTREAM_IFACE2)).thenReturn(UPSTREAM_IFACE_PARAMS2);
-        when(mIpServerDeps.getInterfaceParams(IPSEC_IFACE)).thenReturn(IPSEC_IFACE_PARAMS);
-        when(mAddressCoordinator.requestDownstreamAddress(any(), anyInt(),
-                anyBoolean())).thenReturn(testAddress);
-        when(mRaDaemon.start()).thenReturn(true);
-        ArgumentCaptor<NeighborEventConsumer> neighborEventCaptor =
-                ArgumentCaptor.forClass(NeighborEventConsumer.class);
-        doReturn(mIpNeighborMonitor).when(mIpServerDeps).getIpNeighborMonitor(any(), any(),
-                neighborEventCaptor.capture());
-        final IpServer ipServer = new IpServer(
-                interfaceName, mHandler, TETHERING_WIFI, new SharedLog("test"), mNetd,
-                bpfCoordinator, mRoutingCoordinatorManager, mIpServerCallback, mTetherConfig,
-                mAddressCoordinator, mTetheringMetrics, mIpServerDeps);
-        ipServer.start();
-        ipServer.sendMessage(IpServer.CMD_TETHER_REQUESTED, STATE_TETHERED);
-        mTestLooper.dispatchAll();
-
-        LinkProperties lp = new LinkProperties();
-        lp.setInterfaceName(UPSTREAM_IFACE);
-        lp.setLinkAddresses(UPSTREAM_ADDRESSES);
-        dispatchTetherConnectionChanged(ipServer, UPSTREAM_IFACE, lp, 0);
-
-        mNeighborEventConsumer = neighborEventCaptor.getValue();
-        return ipServer;
-    }
-
-    private void dispatchTetherConnectionChanged(IpServer ipServer, String upstreamIface,
-            LinkProperties v6lp, int ttlAdjustment) {
-        dispatchTetherConnectionChanged(ipServer, upstreamIface);
-        ipServer.sendMessage(IpServer.CMD_IPV6_TETHER_UPDATE, ttlAdjustment, 0, v6lp);
-        mTestLooper.dispatchAll();
-    }
-
-    private void dispatchTetherConnectionChanged(IpServer ipServer, String upstreamIface) {
-        final InterfaceSet ifs = (upstreamIface != null) ? new InterfaceSet(upstreamIface) : null;
-        ipServer.sendMessage(IpServer.CMD_TETHER_CONNECTION_CHANGED, ifs);
-        mTestLooper.dispatchAll();
+    private void dispatchIpv6UpstreamChanged(BpfCoordinator bpfCoordinator, IpServer ipServer,
+            int upstreamIfindex, String upstreamIface, Set<IpPrefix> upstreamPrefixes) {
+        bpfCoordinator.maybeAddUpstreamToLookupTable(upstreamIfindex, upstreamIface);
+        bpfCoordinator.updateIpv6UpstreamInterface(ipServer, upstreamIfindex, upstreamPrefixes);
+        when(ipServer.getIpv6UpstreamIfindex()).thenReturn(upstreamIfindex);
+        when(ipServer.getIpv6UpstreamPrefixes()).thenReturn(upstreamPrefixes);
     }
 
     private void recvNewNeigh(int ifindex, InetAddress addr, short nudState, MacAddress mac) {
         mNeighborEventConsumer.accept(new NeighborEvent(0, RTM_NEWNEIGH, ifindex, addr,
                 nudState, mac));
-        mTestLooper.dispatchAll();
     }
 
     private void recvDelNeigh(int ifindex, InetAddress addr, short nudState, MacAddress mac) {
         mNeighborEventConsumer.accept(new NeighborEvent(0, RTM_DELNEIGH, ifindex, addr,
                 nudState, mac));
-        mTestLooper.dispatchAll();
     }
 
     @NonNull
     private BpfCoordinator makeBpfCoordinator() throws Exception {
+        return makeBpfCoordinator(true /* addDefaultIpServer */);
+    }
+
+    @NonNull
+    private BpfCoordinator makeBpfCoordinator(boolean addDefaultIpServer) throws Exception {
         // mStatsManager will be invoked twice if BpfCoordinator is created the second time.
         clearInvocations(mStatsManager);
+        ArgumentCaptor<NeighborEventConsumer> neighborCaptor =
+                ArgumentCaptor.forClass(NeighborEventConsumer.class);
+        doReturn(mIpNeighborMonitor).when(mDeps).getIpNeighborMonitor(neighborCaptor.capture());
         final BpfCoordinator coordinator = new BpfCoordinator(mDeps);
+        mNeighborEventConsumer = neighborCaptor.getValue();
+        assertNotNull(mNeighborEventConsumer);
 
         mConsumer = coordinator.getBpfConntrackEventConsumerForTesting();
         mTetherClients = coordinator.getTetherClientsForTesting();
@@ -680,6 +647,10 @@ public class BpfCoordinatorTest {
         assertNotNull(mTetherStatsProvider);
         mTetherStatsProviderCb = new TestableNetworkStatsProviderCbBinder();
         mTetherStatsProvider.setProviderCallbackBinder(mTetherStatsProviderCb);
+
+        if (addDefaultIpServer) {
+            coordinator.addIpServer(mIpServer);
+        }
 
         return coordinator;
     }
@@ -1008,7 +979,6 @@ public class BpfCoordinatorTest {
 
         final String mobileIface = "rmnet_data0";
         final Integer mobileIfIndex = 100;
-        coordinator.maybeAddUpstreamToLookupTable(mobileIfIndex, mobileIface);
 
         // InOrder is required because mBpfStatsMap may be accessed by both
         // BpfCoordinator#tetherOffloadRuleAdd and BpfCoordinator#tetherOffloadGetAndClearStats.
@@ -1020,19 +990,18 @@ public class BpfCoordinatorTest {
                 mobileIfIndex, DOWNSTREAM_IFINDEX, UPSTREAM_PREFIX, DOWNSTREAM_MAC);
         final Ipv6DownstreamRule downstreamRule = buildTestDownstreamRule(
                 mobileIfIndex, NEIGH_A, MAC_A);
-        coordinator.updateAllIpv6Rules(
-                mIpServer, DOWNSTREAM_IFACE_PARAMS, mobileIfIndex, UPSTREAM_PREFIXES);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, mobileIfIndex, mobileIface, UPSTREAM_PREFIXES);
         verifyTetherOffloadSetInterfaceQuota(inOrder, mobileIfIndex, QUOTA_UNLIMITED,
                 true /* isInit */);
         verifyAddUpstreamRule(inOrder, upstreamRule);
-        coordinator.addIpv6DownstreamRule(mIpServer, downstreamRule);
+        recvNewNeigh(DOWNSTREAM_IFINDEX, NEIGH_A, NUD_REACHABLE, MAC_A);
         verifyAddDownstreamRule(inOrder, downstreamRule);
 
         // Removing the last rule on current upstream immediately sends the cleanup stuff to BPF.
         updateStatsEntryForTetherOffloadGetAndClearStats(
                 buildTestTetherStatsParcel(mobileIfIndex, 0, 0, 0, 0));
-        coordinator.updateAllIpv6Rules(
-                mIpServer, DOWNSTREAM_IFACE_PARAMS, NO_UPSTREAM, NO_PREFIXES);
+        dispatchIpv6UpstreamChanged(coordinator, mIpServer, NO_UPSTREAM, null, NO_PREFIXES);
         verifyRemoveDownstreamRule(inOrder, downstreamRule);
         verifyRemoveUpstreamRule(inOrder, upstreamRule);
         verifyTetherOffloadGetAndClearStats(inOrder, mobileIfIndex);
@@ -1056,7 +1025,6 @@ public class BpfCoordinatorTest {
 
         doReturn(usingApiS).when(mDeps).isAtLeastS();
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        coordinator.startPolling();
 
         final String mobileIface = "rmnet_data0";
         final Integer mobileIfIndex = 100;
@@ -1092,7 +1060,6 @@ public class BpfCoordinatorTest {
         setupFunctioningNetdInterface();
 
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        coordinator.startPolling();
 
         final String wlanIface = "wlan0";
         final Integer wlanIfIndex = 100;
@@ -1148,7 +1115,7 @@ public class BpfCoordinatorTest {
         // [3] Stop coordinator.
         // Shutdown the coordinator and clear the invocation history, especially the
         // tetherOffloadGetStats() calls.
-        coordinator.stopPolling();
+        coordinator.removeIpServer(mIpServer);
         clearStatsInvocations();
 
         // Verify the polling update thread stopped.
@@ -1162,7 +1129,6 @@ public class BpfCoordinatorTest {
         setupFunctioningNetdInterface();
 
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        coordinator.startPolling();
 
         final String mobileIface = "rmnet_data0";
         final Integer mobileIfIndex = 100;
@@ -1350,7 +1316,6 @@ public class BpfCoordinatorTest {
 
         final String mobileIface = "rmnet_data0";
         final int mobileIfIndex = 100;
-        coordinator.maybeAddUpstreamToLookupTable(mobileIfIndex, mobileIface);
 
         // [1] Default limit.
         // Set the unlimited quota as default if the service has never applied a data limit for a
@@ -1358,8 +1323,8 @@ public class BpfCoordinatorTest {
         final Ipv6UpstreamRule rule = buildTestUpstreamRule(
                 mobileIfIndex, DOWNSTREAM_IFINDEX, UPSTREAM_PREFIX, DOWNSTREAM_MAC);
         final InOrder inOrder = inOrder(mNetd, mBpfUpstream6Map, mBpfLimitMap, mBpfStatsMap);
-        coordinator.updateAllIpv6Rules(
-                mIpServer, DOWNSTREAM_IFACE_PARAMS, mobileIfIndex, UPSTREAM_PREFIXES);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, mobileIfIndex, mobileIface, UPSTREAM_PREFIXES);
         verifyTetherOffloadSetInterfaceQuota(inOrder, mobileIfIndex, QUOTA_UNLIMITED,
                 true /* isInit */);
         verifyAddUpstreamRule(inOrder, rule);
@@ -1395,7 +1360,6 @@ public class BpfCoordinatorTest {
 
         final String mobileIface = "rmnet_data0";
         final int mobileIfIndex = 100;
-        coordinator.maybeAddUpstreamToLookupTable(mobileIfIndex, mobileIface);
 
         // Applying a data limit to the current upstream does not take any immediate action.
         // The data limit could be only set on an upstream which has rules.
@@ -1408,31 +1372,30 @@ public class BpfCoordinatorTest {
         // Adding the first rule on current upstream immediately sends the quota to BPF.
         final Ipv6UpstreamRule ruleA = buildTestUpstreamRule(
                 mobileIfIndex, DOWNSTREAM_IFINDEX, UPSTREAM_PREFIX, DOWNSTREAM_MAC);
-        coordinator.updateAllIpv6Rules(
-                mIpServer, DOWNSTREAM_IFACE_PARAMS, mobileIfIndex, UPSTREAM_PREFIXES);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, mobileIfIndex, mobileIface, UPSTREAM_PREFIXES);
         verifyTetherOffloadSetInterfaceQuota(inOrder, mobileIfIndex, limit, true /* isInit */);
         verifyAddUpstreamRule(inOrder, ruleA);
         inOrder.verifyNoMoreInteractions();
 
         // Adding the second rule on current upstream does not send the quota to BPF.
+        coordinator.addIpServer(mIpServer2);
         final Ipv6UpstreamRule ruleB = buildTestUpstreamRule(
                 mobileIfIndex, DOWNSTREAM_IFINDEX2, UPSTREAM_PREFIX, DOWNSTREAM_MAC2);
-        coordinator.updateAllIpv6Rules(
-                mIpServer2, DOWNSTREAM_IFACE_PARAMS2, mobileIfIndex, UPSTREAM_PREFIXES);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer2, mobileIfIndex, mobileIface, UPSTREAM_PREFIXES);
         verifyAddUpstreamRule(inOrder, ruleB);
         verifyNeverTetherOffloadSetInterfaceQuota(inOrder);
 
         // Removing the second rule on current upstream does not send the quota to BPF.
-        coordinator.updateAllIpv6Rules(
-                mIpServer2, DOWNSTREAM_IFACE_PARAMS2, NO_UPSTREAM, NO_PREFIXES);
+        dispatchIpv6UpstreamChanged(coordinator, mIpServer2, NO_UPSTREAM, null, NO_PREFIXES);
         verifyRemoveUpstreamRule(inOrder, ruleB);
         verifyNeverTetherOffloadSetInterfaceQuota(inOrder);
 
         // Removing the last rule on current upstream immediately sends the cleanup stuff to BPF.
         updateStatsEntryForTetherOffloadGetAndClearStats(
                 buildTestTetherStatsParcel(mobileIfIndex, 0, 0, 0, 0));
-        coordinator.updateAllIpv6Rules(
-                mIpServer, DOWNSTREAM_IFACE_PARAMS, NO_UPSTREAM, NO_PREFIXES);
+        dispatchIpv6UpstreamChanged(coordinator, mIpServer, NO_UPSTREAM, null, NO_PREFIXES);
         verifyRemoveUpstreamRule(inOrder, ruleA);
         verifyTetherOffloadGetAndClearStats(inOrder, mobileIfIndex);
         inOrder.verifyNoMoreInteractions();
@@ -1448,8 +1411,6 @@ public class BpfCoordinatorTest {
         final String mobileIface = "rmnet_data0";
         final Integer ethIfIndex = 100;
         final Integer mobileIfIndex = 101;
-        coordinator.maybeAddUpstreamToLookupTable(ethIfIndex, ethIface);
-        coordinator.maybeAddUpstreamToLookupTable(mobileIfIndex, mobileIface);
 
         final InOrder inOrder = inOrder(mNetd, mBpfDownstream6Map, mBpfUpstream6Map, mBpfLimitMap,
                 mBpfStatsMap);
@@ -1470,14 +1431,14 @@ public class BpfCoordinatorTest {
         final Ipv6DownstreamRule ethernetRuleB = buildTestDownstreamRule(
                 ethIfIndex, NEIGH_B, MAC_B);
 
-        coordinator.updateAllIpv6Rules(
-                mIpServer, DOWNSTREAM_IFACE_PARAMS, ethIfIndex, UPSTREAM_PREFIXES);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, ethIfIndex, ethIface, UPSTREAM_PREFIXES);
         verifyTetherOffloadSetInterfaceQuota(inOrder, ethIfIndex, QUOTA_UNLIMITED,
                 true /* isInit */);
         verifyAddUpstreamRule(inOrder, ethernetUpstreamRule);
-        coordinator.addIpv6DownstreamRule(mIpServer, ethernetRuleA);
+        recvNewNeigh(DOWNSTREAM_IFINDEX, NEIGH_A, NUD_REACHABLE, MAC_A);
         verifyAddDownstreamRule(inOrder, ethernetRuleA);
-        coordinator.addIpv6DownstreamRule(mIpServer, ethernetRuleB);
+        recvNewNeigh(DOWNSTREAM_IFINDEX, NEIGH_B, NUD_REACHABLE, MAC_B);
         verifyAddDownstreamRule(inOrder, ethernetRuleB);
 
         // [2] Update the existing rules from Ethernet to cellular.
@@ -1494,8 +1455,8 @@ public class BpfCoordinatorTest {
 
         // Update the existing rules for upstream changes. The rules are removed and re-added one
         // by one for updating upstream interface index and prefixes by #tetherOffloadRuleUpdate.
-        coordinator.updateAllIpv6Rules(
-                mIpServer, DOWNSTREAM_IFACE_PARAMS, mobileIfIndex, UPSTREAM_PREFIXES2);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, mobileIfIndex, mobileIface, UPSTREAM_PREFIXES2);
         verifyRemoveDownstreamRule(inOrder, ethernetRuleA);
         verifyRemoveDownstreamRule(inOrder, ethernetRuleB);
         verifyRemoveUpstreamRule(inOrder, ethernetUpstreamRule);
@@ -1532,7 +1493,6 @@ public class BpfCoordinatorTest {
         // #makeBpfCoordinator for testing.
         // See #testBpfDisabledbyNoBpfDownstream6Map.
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        coordinator.startPolling();
 
         // The tether stats polling task should not be scheduled.
         mTestLooper.moveTimeForward(DEFAULT_TETHER_OFFLOAD_POLL_INTERVAL_MS);
@@ -1549,7 +1509,7 @@ public class BpfCoordinatorTest {
         final InetAddress neigh = InetAddresses.parseNumericAddress("2001:db8::1");
         final MacAddress mac = MacAddress.fromString("00:00:00:00:00:0a");
         final Ipv6DownstreamRule rule = buildTestDownstreamRule(ifIndex, neigh, mac);
-        coordinator.addIpv6DownstreamRule(mIpServer, rule);
+        recvNewNeigh(DOWNSTREAM_IFINDEX, neigh, NUD_REACHABLE, mac);
         verifyNeverAddDownstreamRule();
         LinkedHashMap<Inet6Address, Ipv6DownstreamRule> rules =
                 coordinator.getIpv6DownstreamRulesForTesting().get(mIpServer);
@@ -1561,7 +1521,7 @@ public class BpfCoordinatorTest {
         rules = new LinkedHashMap<Inet6Address, Ipv6DownstreamRule>();
         rules.put(rule.address, rule);
         coordinator.getIpv6DownstreamRulesForTesting().put(mIpServer, rules);
-        coordinator.removeIpv6DownstreamRule(mIpServer, rule);
+        recvNewNeigh(DOWNSTREAM_IFINDEX, neigh, NUD_STALE, mac);
         verifyNeverRemoveDownstreamRule();
         rules = coordinator.getIpv6DownstreamRulesForTesting().get(mIpServer);
         assertNotNull(rules);
@@ -1575,8 +1535,8 @@ public class BpfCoordinatorTest {
         assertEquals(1, rules.size());
 
         // The rule can't be updated.
-        coordinator.updateAllIpv6Rules(mIpServer, DOWNSTREAM_IFACE_PARAMS,
-                rule.upstreamIfindex + 1 /* new */, UPSTREAM_PREFIXES);
+        coordinator.updateIpv6UpstreamInterface(mIpServer, rule.upstreamIfindex + 1 /* new */,
+                UPSTREAM_PREFIXES);
         verifyNeverRemoveDownstreamRule();
         verifyNeverAddDownstreamRule();
         rules = coordinator.getIpv6DownstreamRulesForTesting().get(mIpServer);
@@ -1753,18 +1713,14 @@ public class BpfCoordinatorTest {
         final BpfCoordinator coordinator = makeBpfCoordinator();
 
         // [1] The default polling interval.
-        coordinator.startPolling();
         assertEquals(DEFAULT_TETHER_OFFLOAD_POLL_INTERVAL_MS, coordinator.getPollingInterval());
-        coordinator.stopPolling();
 
         // [2] Expect the invalid polling interval isn't applied. The valid range of interval is
         // DEFAULT_TETHER_OFFLOAD_POLL_INTERVAL_MS..max_long.
         for (final int interval
                 : new int[] {0, 100, DEFAULT_TETHER_OFFLOAD_POLL_INTERVAL_MS - 1}) {
             when(mTetherConfig.getOffloadPollInterval()).thenReturn(interval);
-            coordinator.startPolling();
             assertEquals(DEFAULT_TETHER_OFFLOAD_POLL_INTERVAL_MS, coordinator.getPollingInterval());
-            coordinator.stopPolling();
         }
 
         // [3] Set a specific polling interval which is larger than default value.
@@ -1772,7 +1728,6 @@ public class BpfCoordinatorTest {
         // approximation is used to verify the scheduled time of the polling thread.
         final int pollingInterval = 100_000;
         when(mTetherConfig.getOffloadPollInterval()).thenReturn(pollingInterval);
-        coordinator.startPolling();
 
         // Expect the specific polling interval to be applied.
         assertEquals(pollingInterval, coordinator.getPollingInterval());
@@ -1800,19 +1755,19 @@ public class BpfCoordinatorTest {
     public void testStartStopConntrackMonitoring() throws Exception {
         setupFunctioningNetdInterface();
 
-        final BpfCoordinator coordinator = makeBpfCoordinator();
+        final BpfCoordinator coordinator = makeBpfCoordinator(false /* addDefaultIpServer */);
 
         // [1] Don't stop monitoring if it has never started.
-        coordinator.stopMonitoring(mIpServer);
+        coordinator.removeIpServer(mIpServer);
         verify(mConntrackMonitor, never()).stop();
 
         // [2] Start monitoring.
-        coordinator.startMonitoring(mIpServer);
+        coordinator.addIpServer(mIpServer);
         verify(mConntrackMonitor).start();
         clearInvocations(mConntrackMonitor);
 
         // [3] Stop monitoring.
-        coordinator.stopMonitoring(mIpServer);
+        coordinator.removeIpServer(mIpServer);
         verify(mConntrackMonitor).stop();
     }
 
@@ -1823,12 +1778,12 @@ public class BpfCoordinatorTest {
     public void testStartStopConntrackMonitoring_R() throws Exception {
         setupFunctioningNetdInterface();
 
-        final BpfCoordinator coordinator = makeBpfCoordinator();
+        final BpfCoordinator coordinator = makeBpfCoordinator(false /* addDefaultIpServer */);
 
-        coordinator.startMonitoring(mIpServer);
+        coordinator.addIpServer(mIpServer);
         verify(mConntrackMonitor, never()).start();
 
-        coordinator.stopMonitoring(mIpServer);
+        coordinator.removeIpServer(mIpServer);
         verify(mConntrackMonitor, never()).stop();
     }
 
@@ -1837,23 +1792,23 @@ public class BpfCoordinatorTest {
     public void testStartStopConntrackMonitoringWithTwoDownstreamIfaces() throws Exception {
         setupFunctioningNetdInterface();
 
-        final BpfCoordinator coordinator = makeBpfCoordinator();
+        final BpfCoordinator coordinator = makeBpfCoordinator(false /* addDefaultIpServer */);
 
         // [1] Start monitoring at the first IpServer adding.
-        coordinator.startMonitoring(mIpServer);
+        coordinator.addIpServer(mIpServer);
         verify(mConntrackMonitor).start();
         clearInvocations(mConntrackMonitor);
 
         // [2] Don't start monitoring at the second IpServer adding.
-        coordinator.startMonitoring(mIpServer2);
+        coordinator.addIpServer(mIpServer2);
         verify(mConntrackMonitor, never()).start();
 
         // [3] Don't stop monitoring if any downstream interface exists.
-        coordinator.stopMonitoring(mIpServer2);
+        coordinator.removeIpServer(mIpServer2);
         verify(mConntrackMonitor, never()).stop();
 
         // [4] Stop monitoring if no downstream exists.
-        coordinator.stopMonitoring(mIpServer);
+        coordinator.removeIpServer(mIpServer);
         verify(mConntrackMonitor).stop();
     }
 
@@ -2016,9 +1971,8 @@ public class BpfCoordinatorTest {
     public void testAddDevMapRule6() throws Exception {
         final BpfCoordinator coordinator = makeBpfCoordinator();
 
-        coordinator.maybeAddUpstreamToLookupTable(UPSTREAM_IFINDEX, UPSTREAM_IFACE);
-        coordinator.updateAllIpv6Rules(
-                mIpServer, DOWNSTREAM_IFACE_PARAMS, UPSTREAM_IFINDEX, UPSTREAM_PREFIXES);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX, UPSTREAM_IFACE, UPSTREAM_PREFIXES);
         verify(mBpfDevMap).updateEntry(eq(new TetherDevKey(UPSTREAM_IFINDEX)),
                 eq(new TetherDevValue(UPSTREAM_IFINDEX)));
         verify(mBpfDevMap).updateEntry(eq(new TetherDevKey(DOWNSTREAM_IFINDEX)),
@@ -2027,8 +1981,9 @@ public class BpfCoordinatorTest {
 
         // Adding the second downstream, only the second downstream ifindex is added to DevMap,
         // the existing upstream ifindex won't be added again.
-        coordinator.updateAllIpv6Rules(
-                mIpServer2, DOWNSTREAM_IFACE_PARAMS2, UPSTREAM_IFINDEX, UPSTREAM_PREFIXES);
+        coordinator.addIpServer(mIpServer2);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer2, UPSTREAM_IFINDEX, UPSTREAM_IFACE, UPSTREAM_PREFIXES);
         verify(mBpfDevMap).updateEntry(eq(new TetherDevKey(DOWNSTREAM_IFINDEX2)),
                 eq(new TetherDevValue(DOWNSTREAM_IFINDEX2)));
         verify(mBpfDevMap, never()).updateEntry(eq(new TetherDevKey(UPSTREAM_IFINDEX)),
@@ -2056,6 +2011,229 @@ public class BpfCoordinatorTest {
                 .setProto(IPPROTO_UDP)
                 .build());
         verify(mBpfDevMap, never()).updateEntry(any(), any());
+    }
+
+    @FeatureFlag(name = TETHER_ACTIVE_SESSIONS_METRICS)
+    // BPF IPv4 forwarding only supports on S+.
+    @IgnoreUpTo(Build.VERSION_CODES.R)
+    @Test
+    public void testMaxConnectionCount_metricsEnabled() throws Exception {
+        doTestMaxConnectionCount(true);
+    }
+
+    @FeatureFlag(name = TETHER_ACTIVE_SESSIONS_METRICS, enabled = false)
+    @Test
+    public void testMaxConnectionCount_metricsDisabled() throws Exception {
+        doTestMaxConnectionCount(false);
+    }
+
+    private void doTestMaxConnectionCount(final boolean supportActiveSessionsMetrics)
+            throws Exception {
+        final BpfCoordinator coordinator = makeBpfCoordinator();
+        initBpfCoordinatorForRule4(coordinator);
+        resetNetdAndBpfMaps();
+        assertEquals(0, mConsumer.getLastMaxConnectionAndResetToCurrent());
+
+        // Prepare add/delete rule events.
+        final ArrayList<ConntrackEvent> addRuleEvents = new ArrayList<>();
+        final ArrayList<ConntrackEvent> delRuleEvents = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            final ConntrackEvent addEvent = new TestConntrackEvent.Builder().setMsgType(
+                    IPCTNL_MSG_CT_NEW).setProto(IPPROTO_TCP).setRemotePort(i).build();
+            addRuleEvents.add(addEvent);
+            final ConntrackEvent delEvent = new TestConntrackEvent.Builder().setMsgType(
+                    IPCTNL_MSG_CT_DELETE).setProto(IPPROTO_TCP).setRemotePort(i).build();
+            delRuleEvents.add(delEvent);
+        }
+
+        // Add rules, verify counter increases.
+        for (int i = 0; i < 5; i++) {
+            mConsumer.accept(addRuleEvents.get(i));
+            assertConsumerCountersEquals(supportActiveSessionsMetrics ? i + 1 : 0);
+        }
+
+        // Add the same events again should not increase the counter because
+        // all events are already exist.
+        for (final ConntrackEvent event : addRuleEvents) {
+            mConsumer.accept(event);
+            assertConsumerCountersEquals(supportActiveSessionsMetrics ? 5 : 0);
+        }
+
+        // Verify removing non-existent items won't change the counters.
+        for (int i = 5; i < 8; i++) {
+            mConsumer.accept(new TestConntrackEvent.Builder().setMsgType(
+                    IPCTNL_MSG_CT_DELETE).setProto(IPPROTO_TCP).setRemotePort(i).build());
+            assertConsumerCountersEquals(supportActiveSessionsMetrics ? 5 : 0);
+        }
+
+        // Verify remove the rules decrease the counter.
+        // Note the max counter returns the max, so it returns the count before deleting.
+        for (int i = 0; i < 5; i++) {
+            mConsumer.accept(delRuleEvents.get(i));
+            assertEquals(supportActiveSessionsMetrics ? 4 - i : 0,
+                    mConsumer.getCurrentConnectionCount());
+            assertEquals(supportActiveSessionsMetrics ? 5 - i : 0,
+                    mConsumer.getLastMaxConnectionCount());
+            assertEquals(supportActiveSessionsMetrics ? 5 - i : 0,
+                    mConsumer.getLastMaxConnectionAndResetToCurrent());
+        }
+
+        // Verify remove these rules again doesn't decrease the counter.
+        for (int i = 0; i < 5; i++) {
+            mConsumer.accept(delRuleEvents.get(i));
+            assertConsumerCountersEquals(0);
+        }
+    }
+
+    // Helper method to assert all counter values inside consumer.
+    private void assertConsumerCountersEquals(int expectedCount) {
+        assertEquals(expectedCount, mConsumer.getCurrentConnectionCount());
+        assertEquals(expectedCount, mConsumer.getLastMaxConnectionCount());
+        assertEquals(expectedCount, mConsumer.getLastMaxConnectionAndResetToCurrent());
+    }
+
+    @FeatureFlag(name = TETHER_ACTIVE_SESSIONS_METRICS)
+    // BPF IPv4 forwarding only supports on S+.
+    @IgnoreUpTo(Build.VERSION_CODES.R)
+    @Test
+    public void doTestMaxConnectionCount_removeClient_metricsEnabled() throws Exception {
+        doTestMaxConnectionCount_removeClient(true);
+    }
+
+    @FeatureFlag(name = TETHER_ACTIVE_SESSIONS_METRICS, enabled = false)
+    @Test
+    public void doTestMaxConnectionCount_removeClient_metricsDisabled() throws Exception {
+        doTestMaxConnectionCount_removeClient(false);
+    }
+
+    private void doTestMaxConnectionCount_removeClient(final boolean supportActiveSessionsMetrics)
+            throws Exception {
+        final BpfCoordinator coordinator = makeBpfCoordinator();
+        initBpfCoordinatorForRule4(coordinator);
+        resetNetdAndBpfMaps();
+
+        // Add client information A and B on on the same downstream.
+        final ClientInfo clientA = new ClientInfo(DOWNSTREAM_IFINDEX, DOWNSTREAM_MAC,
+                PRIVATE_ADDR, MAC_A);
+        final ClientInfo clientB = new ClientInfo(DOWNSTREAM_IFINDEX, DOWNSTREAM_MAC,
+                PRIVATE_ADDR2, MAC_B);
+        coordinator.tetherOffloadClientAdd(mIpServer, clientA);
+        coordinator.tetherOffloadClientAdd(mIpServer, clientB);
+        assertClientInfoExists(mIpServer, clientA);
+        assertClientInfoExists(mIpServer, clientB);
+        assertEquals(0, mConsumer.getLastMaxConnectionAndResetToCurrent());
+
+        // Add some rules for both clients.
+        final int addr1RuleCount = 5;
+        final int addr2RuleCount = 3;
+
+        for (int i = 0; i < addr1RuleCount; i++) {
+            mConsumer.accept(new TestConntrackEvent.Builder()
+                    .setMsgType(IPCTNL_MSG_CT_NEW)
+                    .setProto(IPPROTO_TCP)
+                    .setRemotePort(i)
+                    .setPrivateAddress(PRIVATE_ADDR)
+                    .build());
+        }
+
+        for (int i = addr1RuleCount; i < addr1RuleCount + addr2RuleCount; i++) {
+            mConsumer.accept(new TestConntrackEvent.Builder()
+                    .setMsgType(IPCTNL_MSG_CT_NEW)
+                    .setProto(IPPROTO_TCP)
+                    .setRemotePort(i)
+                    .setPrivateAddress(PRIVATE_ADDR2)
+                    .build());
+        }
+
+        assertConsumerCountersEquals(
+                supportActiveSessionsMetrics ? addr1RuleCount + addr2RuleCount : 0);
+
+        // Remove 1 client. Since the 1st poll will return the LastMaxCounter and
+        // update it to the current, the max counter will be kept at 1st poll, while
+        // the current counter reflect the rule decreasing.
+        coordinator.tetherOffloadClientRemove(mIpServer, clientA);
+        assertEquals(supportActiveSessionsMetrics ? addr2RuleCount : 0,
+                mConsumer.getCurrentConnectionCount());
+        assertEquals(supportActiveSessionsMetrics ? addr1RuleCount + addr2RuleCount : 0,
+                mConsumer.getLastMaxConnectionCount());
+        assertEquals(supportActiveSessionsMetrics ? addr1RuleCount + addr2RuleCount : 0,
+                mConsumer.getLastMaxConnectionAndResetToCurrent());
+        // And all counters be updated at 2nd poll.
+        assertConsumerCountersEquals(supportActiveSessionsMetrics ? addr2RuleCount : 0);
+
+        // Remove other client.
+        coordinator.tetherOffloadClientRemove(mIpServer, clientB);
+        assertEquals(0, mConsumer.getCurrentConnectionCount());
+        assertEquals(supportActiveSessionsMetrics ? addr2RuleCount : 0,
+                mConsumer.getLastMaxConnectionCount());
+        assertEquals(supportActiveSessionsMetrics ? addr2RuleCount : 0,
+                mConsumer.getLastMaxConnectionAndResetToCurrent());
+        // All counters reach zero at 2nd poll.
+        assertConsumerCountersEquals(0);
+    }
+
+    @FeatureFlag(name = TETHER_ACTIVE_SESSIONS_METRICS)
+    // BPF IPv4 forwarding only supports on S+.
+    @IgnoreUpTo(Build.VERSION_CODES.R)
+    @Test
+    public void testSendActiveSessionsReported_metricsEnabled() throws Exception {
+        doTestSendActiveSessionsReported(true);
+    }
+
+    @FeatureFlag(name = TETHER_ACTIVE_SESSIONS_METRICS, enabled = false)
+    @Test
+    public void testSendActiveSessionsReported_metricsDisabled() throws Exception {
+        doTestSendActiveSessionsReported(false);
+    }
+
+    private void doTestSendActiveSessionsReported(final boolean supportActiveSessionsMetrics)
+            throws Exception {
+        final BpfCoordinator coordinator = makeBpfCoordinator();
+        initBpfCoordinatorForRule4(coordinator);
+        resetNetdAndBpfMaps();
+        assertConsumerCountersEquals(0);
+
+        // Prepare the counter value.
+        for (int i = 0; i < 5; i++) {
+            mConsumer.accept(new TestConntrackEvent.Builder().setMsgType(
+                    IPCTNL_MSG_CT_NEW).setProto(IPPROTO_TCP).setRemotePort(i).build());
+        }
+
+        // Then delete some 3 rules, 2 rules remaining.
+        // The max count is 5 while current rules count is 2.
+        for (int i = 0; i < 3; i++) {
+            mConsumer.accept(new TestConntrackEvent.Builder().setMsgType(
+                    IPCTNL_MSG_CT_DELETE).setProto(IPPROTO_TCP).setRemotePort(i).build());
+        }
+
+        // Verify the method is not invoked when timer is not expired.
+        waitForIdle();
+        verify(mDeps, never()).sendTetheringActiveSessionsReported(anyInt());
+
+        // Verify metrics will be sent upon timer expiry.
+        mTestLooper.moveTimeForward(CONNTRACK_METRICS_UPDATE_INTERVAL_MS);
+        waitForIdle();
+        if (supportActiveSessionsMetrics) {
+            verify(mDeps).sendTetheringActiveSessionsReported(5);
+        } else {
+            verify(mDeps, never()).sendTetheringActiveSessionsReported(anyInt());
+        }
+
+        // Verify next uploaded metrics will reflect the decreased rules count.
+        mTestLooper.moveTimeForward(CONNTRACK_METRICS_UPDATE_INTERVAL_MS);
+        waitForIdle();
+        if (supportActiveSessionsMetrics) {
+            verify(mDeps).sendTetheringActiveSessionsReported(2);
+        } else {
+            verify(mDeps, never()).sendTetheringActiveSessionsReported(anyInt());
+        }
+
+        // Verify no metrics uploaded if polling stopped.
+        clearInvocations(mDeps);
+        coordinator.removeIpServer(mIpServer);
+        mTestLooper.moveTimeForward(CONNTRACK_TIMEOUT_UPDATE_INTERVAL_MS);
+        waitForIdle();
+        verify(mDeps, never()).sendTetheringActiveSessionsReported(anyInt());
     }
 
     private void setElapsedRealtimeNanos(long nanoSec) {
@@ -2087,7 +2265,6 @@ public class BpfCoordinatorTest {
                 .startMocking();
         try {
             final BpfCoordinator coordinator = makeBpfCoordinator();
-            coordinator.startPolling();
             bpfMap.insertEntry(tcpKey, tcpValue);
             bpfMap.insertEntry(udpKey, udpValue);
 
@@ -2116,7 +2293,7 @@ public class BpfCoordinatorTest {
             ExtendedMockito.clearInvocations(staticMockMarker(NetlinkUtils.class));
 
             // [3] Don't refresh conntrack timeout if polling stopped.
-            coordinator.stopPolling();
+            coordinator.removeIpServer(mIpServer);
             mTestLooper.moveTimeForward(CONNTRACK_TIMEOUT_UPDATE_INTERVAL_MS);
             waitForIdle();
             ExtendedMockito.verifyNoMoreInteractions(staticMockMarker(NetlinkUtils.class));
@@ -2855,8 +3032,9 @@ public class BpfCoordinatorTest {
         final int myIfindex = DOWNSTREAM_IFINDEX;
         final int notMyIfindex = myIfindex - 1;
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        final IpServer ipServer = makeAndStartIpServer(DOWNSTREAM_IFACE, coordinator);
 
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX, UPSTREAM_IFACE, UPSTREAM_PREFIXES);
         resetNetdAndBpfMaps();
         verifyNoMoreInteractions(mNetd, mBpfDownstream6Map, mBpfUpstream6Map);
 
@@ -2905,10 +3083,8 @@ public class BpfCoordinatorTest {
         resetNetdAndBpfMaps();
 
         InOrder inOrder = inOrder(mNetd, mBpfDownstream6Map, mBpfUpstream6Map);
-        LinkProperties lp = new LinkProperties();
-        lp.setInterfaceName(UPSTREAM_IFACE2);
-        lp.setLinkAddresses(UPSTREAM_ADDRESSES);
-        dispatchTetherConnectionChanged(ipServer, UPSTREAM_IFACE2, lp, -1);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX2, UPSTREAM_IFACE2, UPSTREAM_PREFIXES);
         final Ipv6DownstreamRule ruleA2 = buildTestDownstreamRule(
                 UPSTREAM_IFINDEX2, NEIGH_A, MAC_A);
         final Ipv6DownstreamRule ruleB2 = buildTestDownstreamRule(
@@ -2922,11 +3098,9 @@ public class BpfCoordinatorTest {
         verifyNoUpstreamIpv6ForwardingChange(inOrder);
         resetNetdAndBpfMaps();
 
-        // Upstream link addresses change result in updating the rules.
-        LinkProperties lp2 = new LinkProperties();
-        lp2.setInterfaceName(UPSTREAM_IFACE2);
-        lp2.setLinkAddresses(UPSTREAM_ADDRESSES2);
-        dispatchTetherConnectionChanged(ipServer, UPSTREAM_IFACE2, lp2, -1);
+        // Upstream prefixes change result in updating the rules.
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX2, UPSTREAM_IFACE2, UPSTREAM_PREFIXES2);
         verifyRemoveDownstreamRule(inOrder, ruleA2);
         verifyRemoveDownstreamRule(inOrder, ruleB2);
         verifyStopUpstreamIpv6Forwarding(inOrder, UPSTREAM_PREFIXES);
@@ -2936,7 +3110,7 @@ public class BpfCoordinatorTest {
         resetNetdAndBpfMaps();
 
         // When the upstream is lost, rules are removed.
-        dispatchTetherConnectionChanged(ipServer, null, null, 0);
+        dispatchIpv6UpstreamChanged(coordinator, mIpServer, NO_UPSTREAM, null, NO_PREFIXES);
         verifyStopUpstreamIpv6Forwarding(inOrder, UPSTREAM_PREFIXES2);
         verifyRemoveDownstreamRule(ruleA2);
         verifyRemoveDownstreamRule(ruleB2);
@@ -2947,7 +3121,7 @@ public class BpfCoordinatorTest {
         resetNetdAndBpfMaps();
 
         // If the upstream is IPv4-only, no IPv6 rules are added to BPF map.
-        dispatchTetherConnectionChanged(ipServer, UPSTREAM_IFACE);
+        dispatchIpv6UpstreamChanged(coordinator, mIpServer, NO_UPSTREAM, null, NO_PREFIXES);
         resetNetdAndBpfMaps();
         recvNewNeigh(myIfindex, NEIGH_A, NUD_REACHABLE, MAC_A);
         verifyNoUpstreamIpv6ForwardingChange(null);
@@ -2957,8 +3131,8 @@ public class BpfCoordinatorTest {
 
         // Rules can be added again once upstream IPv6 connectivity is available. The existing rules
         // with an upstream of NO_UPSTREAM are reapplied.
-        lp.setInterfaceName(UPSTREAM_IFACE);
-        dispatchTetherConnectionChanged(ipServer, UPSTREAM_IFACE, lp, -1);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX, UPSTREAM_IFACE, UPSTREAM_PREFIXES);
         verifyStartUpstreamIpv6Forwarding(null, UPSTREAM_IFINDEX, UPSTREAM_PREFIXES);
         verifyAddDownstreamRule(ruleA);
         recvNewNeigh(myIfindex, NEIGH_B, NUD_REACHABLE, MAC_B);
@@ -2966,23 +3140,27 @@ public class BpfCoordinatorTest {
 
         // If upstream IPv6 connectivity is lost, rules are removed.
         resetNetdAndBpfMaps();
-        dispatchTetherConnectionChanged(ipServer, UPSTREAM_IFACE, null, 0);
+        dispatchIpv6UpstreamChanged(coordinator, mIpServer, NO_UPSTREAM, null, NO_PREFIXES);
         verifyRemoveDownstreamRule(ruleA);
         verifyRemoveDownstreamRule(ruleB);
         verifyStopUpstreamIpv6Forwarding(null, UPSTREAM_PREFIXES);
 
         // When upstream IPv6 connectivity comes back, upstream rules are added and downstream rules
         // are reapplied.
-        lp.setInterfaceName(UPSTREAM_IFACE);
-        dispatchTetherConnectionChanged(ipServer, UPSTREAM_IFACE, lp, -1);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX, UPSTREAM_IFACE, UPSTREAM_PREFIXES);
         verifyStartUpstreamIpv6Forwarding(null, UPSTREAM_IFINDEX, UPSTREAM_PREFIXES);
         verifyAddDownstreamRule(ruleA);
         verifyAddDownstreamRule(ruleB);
         resetNetdAndBpfMaps();
 
         // When the downstream interface goes down, rules are removed.
-        ipServer.stop();
-        mTestLooper.dispatchAll();
+        // Simulate receiving CMD_INTERFACE_DOWN in the BaseServingState of IpServer.
+        reset(mIpNeighborMonitor);
+        dispatchIpv6UpstreamChanged(coordinator, mIpServer, NO_UPSTREAM, null, NO_PREFIXES);
+        coordinator.tetherOffloadClientClear(mIpServer);
+        coordinator.removeIpServer(mIpServer);
+
         verifyStopUpstreamIpv6Forwarding(null, UPSTREAM_PREFIXES);
         verifyRemoveDownstreamRule(ruleA);
         verifyRemoveDownstreamRule(ruleB);
@@ -3004,7 +3182,8 @@ public class BpfCoordinatorTest {
         // [1] Enable BPF offload.
         // A neighbor that is added or deleted causes the rule to be added or removed.
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        final IpServer ipServer = makeAndStartIpServer(DOWNSTREAM_IFACE, coordinator);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX, UPSTREAM_IFACE, UPSTREAM_PREFIXES);
         resetNetdAndBpfMaps();
 
         recvNewNeigh(myIfindex, NEIGH_A, NUD_REACHABLE, MAC_A);
@@ -3019,10 +3198,8 @@ public class BpfCoordinatorTest {
         resetNetdAndBpfMaps();
 
         // Upstream IPv6 connectivity change causes upstream rules change.
-        LinkProperties lp2 = new LinkProperties();
-        lp2.setInterfaceName(UPSTREAM_IFACE2);
-        lp2.setLinkAddresses(UPSTREAM_ADDRESSES2);
-        dispatchTetherConnectionChanged(ipServer, UPSTREAM_IFACE2, lp2, 0);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX2, UPSTREAM_IFACE2, UPSTREAM_PREFIXES2);
         verifyStartUpstreamIpv6Forwarding(null, UPSTREAM_IFINDEX2, UPSTREAM_PREFIXES2);
         resetNetdAndBpfMaps();
 
@@ -3030,7 +3207,6 @@ public class BpfCoordinatorTest {
         // A neighbor that is added or deleted doesn’t cause the rule to be added or removed.
         when(mTetherConfig.isBpfOffloadEnabled()).thenReturn(false);
         final BpfCoordinator coordinator2 = makeBpfCoordinator();
-        final IpServer ipServer2 = makeAndStartIpServer(DOWNSTREAM_IFACE, coordinator2);
         verifyNoUpstreamIpv6ForwardingChange(null);
         resetNetdAndBpfMaps();
 
@@ -3043,7 +3219,8 @@ public class BpfCoordinatorTest {
         resetNetdAndBpfMaps();
 
         // Upstream IPv6 connectivity change doesn't cause the rule to be added or removed.
-        dispatchTetherConnectionChanged(ipServer2, UPSTREAM_IFACE2, lp2, 0);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer2, UPSTREAM_IFINDEX2, UPSTREAM_IFACE2, NO_PREFIXES);
         verifyNoUpstreamIpv6ForwardingChange(null);
         verifyNeverRemoveDownstreamRule();
         resetNetdAndBpfMaps();
@@ -3053,7 +3230,6 @@ public class BpfCoordinatorTest {
     public void doesNotStartIpNeighborMonitorIfBpfOffloadDisabled() throws Exception {
         when(mTetherConfig.isBpfOffloadEnabled()).thenReturn(false);
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        final IpServer ipServer = makeAndStartIpServer(DOWNSTREAM_IFACE, coordinator);
 
         // IP neighbor monitor doesn't start if BPF offload is disabled.
         verify(mIpNeighborMonitor, never()).start();
@@ -3062,15 +3238,10 @@ public class BpfCoordinatorTest {
     @Test
     public void testSkipVirtualNetworkInBpf() throws Exception {
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        final IpServer ipServer = makeAndStartIpServer(DOWNSTREAM_IFACE, coordinator);
-        final LinkProperties v6Only = new LinkProperties();
-        v6Only.setInterfaceName(IPSEC_IFACE);
-        v6Only.setLinkAddresses(UPSTREAM_ADDRESSES);
 
         resetNetdAndBpfMaps();
-        dispatchTetherConnectionChanged(ipServer, IPSEC_IFACE, v6Only, 0);
-        verify(mNetd).tetherAddForward(DOWNSTREAM_IFACE, IPSEC_IFACE);
-        verify(mNetd).ipfwdAddInterfaceForward(DOWNSTREAM_IFACE, IPSEC_IFACE);
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, IPSEC_IFINDEX, IPSEC_IFACE, UPSTREAM_PREFIXES);
         verifyNeverAddUpstreamRule();
 
         recvNewNeigh(DOWNSTREAM_IFINDEX, NEIGH_A, NUD_REACHABLE, MAC_A);
@@ -3080,7 +3251,6 @@ public class BpfCoordinatorTest {
     @Test
     public void addRemoveTetherClient() throws Exception {
         final BpfCoordinator coordinator = makeBpfCoordinator();
-        final IpServer ipServer = makeAndStartIpServer(DOWNSTREAM_IFACE, coordinator);
         final int myIfindex = DOWNSTREAM_IFINDEX;
         final int notMyIfindex = myIfindex - 1;
 
@@ -3089,33 +3259,36 @@ public class BpfCoordinatorTest {
         final InetAddress neighLL = InetAddresses.parseNumericAddress("169.254.0.1");
         final InetAddress neighMC = InetAddresses.parseNumericAddress("224.0.0.1");
 
+        dispatchIpv6UpstreamChanged(
+                coordinator, mIpServer, UPSTREAM_IFINDEX, UPSTREAM_IFACE, UPSTREAM_PREFIXES);
+
         // Events on other interfaces are ignored.
         recvNewNeigh(notMyIfindex, neighA, NUD_REACHABLE, MAC_A);
-        assertNull(mTetherClients.get(ipServer));
+        assertNull(mTetherClients.get(mIpServer));
 
         // Events on this interface are received and sent to BpfCoordinator.
         recvNewNeigh(myIfindex, neighA, NUD_REACHABLE, MAC_A);
-        assertClientInfoExists(ipServer,
+        assertClientInfoExists(mIpServer,
                 new ClientInfo(myIfindex, DOWNSTREAM_MAC, (Inet4Address) neighA, MAC_A));
 
         recvNewNeigh(myIfindex, neighB, NUD_REACHABLE, MAC_B);
-        assertClientInfoExists(ipServer,
+        assertClientInfoExists(mIpServer,
                 new ClientInfo(myIfindex, DOWNSTREAM_MAC, (Inet4Address) neighB, MAC_B));
 
         // Link-local and multicast neighbors are ignored.
         recvNewNeigh(myIfindex, neighLL, NUD_REACHABLE, MAC_A);
-        assertClientInfoDoesNotExist(ipServer, (Inet4Address) neighLL);
+        assertClientInfoDoesNotExist(mIpServer, (Inet4Address) neighLL);
         recvNewNeigh(myIfindex, neighMC, NUD_REACHABLE, MAC_A);
-        assertClientInfoDoesNotExist(ipServer, (Inet4Address) neighMC);
+        assertClientInfoDoesNotExist(mIpServer, (Inet4Address) neighMC);
 
         // A neighbor that is no longer valid causes the client to be removed.
         // NUD_FAILED events do not have a MAC address.
         recvNewNeigh(myIfindex, neighA, NUD_FAILED, null);
-        assertClientInfoDoesNotExist(ipServer, (Inet4Address) neighA);
+        assertClientInfoDoesNotExist(mIpServer, (Inet4Address) neighA);
 
         // A neighbor that is deleted causes the client to be removed.
         recvDelNeigh(myIfindex, neighB, NUD_STALE, MAC_B);
         // When last client information is deleted, IpServer will be removed from mTetherClients
-        assertNull(mTetherClients.get(ipServer));
+        assertNull(mTetherClients.get(mIpServer));
     }
 }

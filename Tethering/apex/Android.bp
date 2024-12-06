@@ -98,10 +98,8 @@ apex {
     ],
     canned_fs_config: "canned_fs_config",
     bpfs: [
-        "block.o",
         "clatd.o",
         "dscpPolicy.o",
-        "gentle.o",
         "netd.o",
         "offload.o",
         "offload@mainline.o",
@@ -115,7 +113,7 @@ apex {
         "current_sdkinfo",
         "netbpfload.33rc",
         "netbpfload.35rc",
-        "ot-daemon.init.34rc",
+        "ot-daemon.34rc",
     ],
     manifest: "manifest.json",
     key: "com.android.tethering.key",
@@ -216,6 +214,7 @@ bootclasspath_fragment {
             "android.net.nsd",
             "android.net.thread",
             "android.net.wear",
+            "android.net.http.internal",
         ],
     },
 }

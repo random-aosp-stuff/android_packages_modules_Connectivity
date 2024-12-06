@@ -2180,6 +2180,7 @@ public class ConnectivityServiceTest {
                 case ConnectivityFlags.CARRIER_SERVICE_CHANGED_USE_CALLBACK:
                 case ConnectivityFlags.REQUEST_RESTRICTED_WIFI:
                 case ConnectivityFlags.USE_DECLARED_METHODS_FOR_CALLBACKS:
+                case ConnectivityFlags.QUEUE_CALLBACKS_FOR_FROZEN_APPS:
                 case KEY_DESTROY_FROZEN_SOCKETS_VERSION:
                     return true;
                 default:
@@ -2871,7 +2872,7 @@ public class ConnectivityServiceTest {
         };
         final NetworkRequest request = mService.listenForNetwork(caps, messenger, binder,
                 NetworkCallback.FLAG_NONE, mContext.getOpPackageName(),
-                mContext.getAttributionTag());
+                mContext.getAttributionTag(), ~0 /* declaredMethodsFlag */);
         mService.releaseNetworkRequest(request);
         deathRecipient.get().binderDied();
         // Wait for the release message to be processed.
@@ -5407,7 +5408,7 @@ public class ConnectivityServiceTest {
             mService.requestNetwork(Process.INVALID_UID, networkCapabilities,
                     NetworkRequest.Type.REQUEST.ordinal(), null, 0, null,
                     ConnectivityManager.TYPE_WIFI, NetworkCallback.FLAG_NONE,
-                    mContext.getPackageName(), getAttributionTag());
+                    mContext.getPackageName(), getAttributionTag(), ~0 /* declaredMethodsFlag */);
         });
 
         final NetworkRequest.Builder builder =
@@ -13655,7 +13656,8 @@ public class ConnectivityServiceTest {
                     IllegalArgumentException.class,
                     () -> mService.requestNetwork(Process.INVALID_UID, nc, reqTypeInt, null, 0,
                             null, ConnectivityManager.TYPE_NONE, NetworkCallback.FLAG_NONE,
-                            mContext.getPackageName(), getAttributionTag())
+                            mContext.getPackageName(), getAttributionTag(),
+                            ~0 /* declaredMethodsFlag */)
             );
         }
     }

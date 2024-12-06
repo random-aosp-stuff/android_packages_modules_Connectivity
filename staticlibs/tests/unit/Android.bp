@@ -27,10 +27,11 @@ android_library {
         "net-utils-device-common-ip",
         "net-utils-device-common-struct-base",
         "net-utils-device-common-wear",
+        "net-utils-service-connectivity",
     ],
     libs: [
-        "android.test.runner",
-        "android.test.base",
+        "android.test.runner.stubs",
+        "android.test.base.stubs",
     ],
     visibility: [
         "//frameworks/base/packages/Tethering/tests/integration",
@@ -39,6 +40,7 @@ android_library {
         "//packages/modules/NetworkStack/tests/integration",
     ],
     lint: {
+        strict_updatability_linting: true,
         test: true,
     },
 }
@@ -56,4 +58,28 @@ android_test {
     ],
     jarjar_rules: "jarjar-rules.txt",
     test_suites: ["device-tests"],
+    lint: {
+        strict_updatability_linting: true,
+    },
+}
+
+python_test_host {
+    name: "NetworkStaticLibHostPythonTests",
+    srcs: [
+        "host/python/*.py",
+    ],
+    main: "host/python/run_tests.py",
+    libs: [
+        "absl-py",
+        "mobly",
+        "net-tests-utils-host-python-common",
+    ],
+    test_config: "host/python/test_config.xml",
+    test_suites: [
+        "general-tests",
+    ],
+    // MoblyBinaryHostTest doesn't support unit_test.
+    test_options: {
+        unit_test: false,
+    },
 }

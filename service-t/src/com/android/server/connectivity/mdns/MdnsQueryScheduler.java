@@ -63,17 +63,22 @@ public class MdnsQueryScheduler {
      * rescheduling is not necessary.
      */
     @Nullable
-    public ScheduledQueryTaskArgs maybeRescheduleCurrentRun(long now,
-            long minRemainingTtl, long lastSentTime, long sessionId) {
+    public ScheduledQueryTaskArgs maybeRescheduleCurrentRun(
+            long now,
+            long minRemainingTtl,
+            long lastSentTime,
+            long sessionId,
+            int numOfQueriesBeforeBackoff) {
         if (mLastScheduledQueryTaskArgs == null) {
             return null;
         }
-        if (!mLastScheduledQueryTaskArgs.config.shouldUseQueryBackoff()) {
+        if (!mLastScheduledQueryTaskArgs.config.shouldUseQueryBackoff(numOfQueriesBeforeBackoff)) {
             return null;
         }
 
         final long timeToRun = calculateTimeToRun(mLastScheduledQueryTaskArgs,
-                mLastScheduledQueryTaskArgs.config, now, minRemainingTtl, lastSentTime);
+                mLastScheduledQueryTaskArgs.config, now, minRemainingTtl, lastSentTime,
+                numOfQueriesBeforeBackoff, false /* forceEnableBackoff */);
 
         if (timeToRun <= mLastScheduledQueryTaskArgs.timeToRun) {
             return null;
@@ -95,14 +100,18 @@ public class MdnsQueryScheduler {
             long minRemainingTtl,
             long now,
             long lastSentTime,
-            long sessionId) {
-        final QueryTaskConfig nextRunConfig = currentConfig.getConfigForNextRun();
-        final long timeToRun;
-        if (mLastScheduledQueryTaskArgs == null) {
+            long sessionId,
+            int queryMode,
+            int numOfQueriesBeforeBackoff,
+            boolean forceEnableBackoff) {
+        final QueryTaskConfig nextRunConfig = currentConfig.getConfigForNextRun(queryMode);
+        long timeToRun;
+        if (mLastScheduledQueryTaskArgs == null && !forceEnableBackoff) {
             timeToRun = now + nextRunConfig.delayUntilNextTaskWithoutBackoffMs;
         } else {
             timeToRun = calculateTimeToRun(mLastScheduledQueryTaskArgs,
-                    nextRunConfig, now, minRemainingTtl, lastSentTime);
+                    nextRunConfig, now, minRemainingTtl, lastSentTime, numOfQueriesBeforeBackoff,
+                    forceEnableBackoff);
         }
         mLastScheduledQueryTaskArgs = new ScheduledQueryTaskArgs(nextRunConfig, timeToRun,
                 minRemainingTtl + now,
@@ -121,10 +130,12 @@ public class MdnsQueryScheduler {
         return mLastScheduledQueryTaskArgs;
     }
 
-    private static long calculateTimeToRun(@NonNull ScheduledQueryTaskArgs taskArgs,
-            QueryTaskConfig queryTaskConfig, long now, long minRemainingTtl, long lastSentTime) {
+    private static long calculateTimeToRun(@Nullable ScheduledQueryTaskArgs taskArgs,
+            QueryTaskConfig queryTaskConfig, long now, long minRemainingTtl, long lastSentTime,
+            int numOfQueriesBeforeBackoff, boolean forceEnableBackoff) {
         final long baseDelayInMs = queryTaskConfig.delayUntilNextTaskWithoutBackoffMs;
-        if (!queryTaskConfig.shouldUseQueryBackoff()) {
+        if (!(forceEnableBackoff
+                || queryTaskConfig.shouldUseQueryBackoff(numOfQueriesBeforeBackoff))) {
             return lastSentTime + baseDelayInMs;
         }
         if (minRemainingTtl <= 0) {
@@ -133,7 +144,7 @@ public class MdnsQueryScheduler {
             return lastSentTime + baseDelayInMs;
         }
         // If the next TTL expiration time hasn't changed, then use previous calculated timeToRun.
-        if (lastSentTime < now
+        if (lastSentTime < now && taskArgs != null
                 && taskArgs.minTtlExpirationTimeWhenScheduled == now + minRemainingTtl) {
             // Use the original scheduling time if the TTL has not changed, to avoid continuously
             // rescheduling to 80% of the remaining TTL as time passes

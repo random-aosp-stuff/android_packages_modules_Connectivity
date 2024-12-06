@@ -165,6 +165,7 @@ open class CSTest {
         it[ConnectivityFlags.BACKGROUND_FIREWALL_CHAIN] = true
         it[ConnectivityFlags.DELAY_DESTROY_SOCKETS] = true
         it[ConnectivityFlags.USE_DECLARED_METHODS_FOR_CALLBACKS] = true
+        it[ConnectivityFlags.QUEUE_CALLBACKS_FOR_FROZEN_APPS] = true
     }
     fun setFeatureEnabled(flag: String, enabled: Boolean) = enabledFeatures.set(flag, enabled)
 
@@ -537,8 +538,12 @@ open class CSTest {
             provider: NetworkProvider? = null
     ) = CSAgentWrapper(context, deps, csHandlerThread, networkStack,
             nac, nc, lp, lnc, score, provider)
-    fun Agent(vararg transports: Int, lp: LinkProperties = defaultLp()): CSAgentWrapper {
-        val nc = NetworkCapabilities.Builder().apply {
+    fun Agent(
+        vararg transports: Int,
+        baseNc: NetworkCapabilities = defaultNc(),
+        lp: LinkProperties = defaultLp()
+    ): CSAgentWrapper {
+        val nc = NetworkCapabilities.Builder(baseNc).apply {
             transports.forEach {
                 addTransportType(it)
             }

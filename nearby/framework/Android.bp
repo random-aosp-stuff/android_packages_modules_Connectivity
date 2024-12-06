@@ -49,13 +49,17 @@ java_library {
     libs: [
         "androidx.annotation_annotation",
         "framework-annotations-lib",
-        "framework-bluetooth",
+        "framework-bluetooth.stubs.module_lib",
         "framework-location.stubs.module_lib",
     ],
     static_libs: [
         "modules-utils-preconditions",
+        "com.android.nearby.flags-aconfig-java",
     ],
     visibility: [
         "//packages/modules/Connectivity/nearby/tests:__subpackages__",
     ],
+    lint: {
+        baseline_filename: "lint-baseline.xml",
+    },
 }

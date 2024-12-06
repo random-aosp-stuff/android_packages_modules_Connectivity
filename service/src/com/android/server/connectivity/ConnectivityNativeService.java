@@ -23,6 +23,7 @@ import android.net.connectivity.aidl.ConnectivityNative;
 import android.os.Binder;
 import android.os.Process;
 import android.os.ServiceSpecificException;
+import android.os.UserHandle;
 import android.system.ErrnoException;
 import android.util.Log;
 
@@ -42,7 +43,7 @@ public class ConnectivityNativeService extends ConnectivityNative.Stub {
     private static final String TAG = ConnectivityNativeService.class.getSimpleName();
 
     private static final String BLOCKED_PORTS_MAP_PATH =
-            "/sys/fs/bpf/net_shared/map_block_blocked_ports_map";
+            "/sys/fs/bpf/netd_shared/map_netd_blocked_ports_map";
 
     private final Context mContext;
 
@@ -67,8 +68,8 @@ public class ConnectivityNativeService extends ConnectivityNative.Stub {
     }
 
     private void enforceBlockPortPermission() {
-        final int uid = Binder.getCallingUid();
-        if (uid == Process.ROOT_UID || uid == Process.PHONE_UID) return;
+        final int appId = UserHandle.getAppId(Binder.getCallingUid());
+        if (appId == Process.ROOT_UID || appId == Process.PHONE_UID) return;
         PermissionUtils.enforceNetworkStackPermission(mContext);
     }
 
