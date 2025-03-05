@@ -44,16 +44,36 @@ import java.util.Objects;
 @FlaggedApi(Flags.FLAG_CONFIGURATION_ENABLED)
 @SystemApi
 public final class ThreadConfiguration implements Parcelable {
+    private final boolean mBorderRouterEnabled;
     private final boolean mNat64Enabled;
     private final boolean mDhcpv6PdEnabled;
 
     private ThreadConfiguration(Builder builder) {
-        this(builder.mNat64Enabled, builder.mDhcpv6PdEnabled);
+        this(builder.mBorderRouterEnabled, builder.mNat64Enabled, builder.mDhcpv6PdEnabled);
     }
 
-    private ThreadConfiguration(boolean nat64Enabled, boolean dhcpv6PdEnabled) {
+    private ThreadConfiguration(
+            boolean borderRouterEnabled, boolean nat64Enabled, boolean dhcpv6PdEnabled) {
+        this.mBorderRouterEnabled = borderRouterEnabled;
         this.mNat64Enabled = nat64Enabled;
         this.mDhcpv6PdEnabled = dhcpv6PdEnabled;
+    }
+
+    /**
+     * Returns {@code true} if this device is operating as a Thread Border Router.
+     *
+     * <p>A Thread Border Router works on both Thread and infrastructure networks. For example, it
+     * can route packets between Thread and infrastructure networks (e.g. Wi-Fi or Ethernet), makes
+     * devices in both networks discoverable to each other, and accepts connections from external
+     * commissioner.
+     *
+     * <p>Note it costs significantly more power to operate as a Border Router, so this is typically
+     * only enabled for wired Android devices (e.g. TV or display).
+     *
+     * @hide
+     */
+    public boolean isBorderRouterEnabled() {
+        return mBorderRouterEnabled;
     }
 
     /** Returns {@code true} if NAT64 is enabled. */
@@ -61,7 +81,11 @@ public final class ThreadConfiguration implements Parcelable {
         return mNat64Enabled;
     }
 
-    /** Returns {@code true} if DHCPv6 Prefix Delegation is enabled. */
+    /**
+     * Returns {@code true} if DHCPv6 Prefix Delegation is enabled.
+     *
+     * @hide
+     */
     public boolean isDhcpv6PdEnabled() {
         return mDhcpv6PdEnabled;
     }
@@ -74,22 +98,24 @@ public final class ThreadConfiguration implements Parcelable {
             return false;
         } else {
             ThreadConfiguration otherConfig = (ThreadConfiguration) other;
-            return mNat64Enabled == otherConfig.mNat64Enabled
+            return mBorderRouterEnabled == otherConfig.mBorderRouterEnabled
+                    && mNat64Enabled == otherConfig.mNat64Enabled
                     && mDhcpv6PdEnabled == otherConfig.mDhcpv6PdEnabled;
         }
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(mNat64Enabled, mDhcpv6PdEnabled);
+        return Objects.hash(mBorderRouterEnabled, mNat64Enabled, mDhcpv6PdEnabled);
     }
 
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
         sb.append('{');
-        sb.append("Nat64Enabled=").append(mNat64Enabled);
-        sb.append(", Dhcpv6PdEnabled=").append(mDhcpv6PdEnabled);
+        sb.append("borderRouterEnabled=").append(mBorderRouterEnabled);
+        sb.append(", nat64Enabled=").append(mNat64Enabled);
+        sb.append(", dhcpv6PdEnabled=").append(mDhcpv6PdEnabled);
         sb.append('}');
         return sb.toString();
     }
@@ -101,6 +127,7 @@ public final class ThreadConfiguration implements Parcelable {
 
     @Override
     public void writeToParcel(@NonNull Parcel dest, int flags) {
+        dest.writeBoolean(mBorderRouterEnabled);
         dest.writeBoolean(mNat64Enabled);
         dest.writeBoolean(mDhcpv6PdEnabled);
     }
@@ -110,6 +137,7 @@ public final class ThreadConfiguration implements Parcelable {
                 @Override
                 public ThreadConfiguration createFromParcel(Parcel in) {
                     ThreadConfiguration.Builder builder = new ThreadConfiguration.Builder();
+                    builder.setBorderRouterEnabled(in.readBoolean());
                     builder.setNat64Enabled(in.readBoolean());
                     builder.setDhcpv6PdEnabled(in.readBoolean());
                     return builder.build();
@@ -126,23 +154,53 @@ public final class ThreadConfiguration implements Parcelable {
      *
      * @hide
      */
+    @FlaggedApi(Flags.FLAG_SET_NAT64_CONFIGURATION_ENABLED)
+    @SystemApi
     public static final class Builder {
+        // Thread in Android V is default to a Border Router device, so the default value here needs
+        // to be {@code true} to be compatible.
+        private boolean mBorderRouterEnabled = true;
+
         private boolean mNat64Enabled = false;
         private boolean mDhcpv6PdEnabled = false;
 
-        /** Creates a new {@link Builder} object with all features disabled. */
+        /**
+         * Creates a new {@link Builder} object with all features disabled.
+         *
+         * @hide
+         */
+        @FlaggedApi(Flags.FLAG_SET_NAT64_CONFIGURATION_ENABLED)
+        @SystemApi
         public Builder() {}
 
         /**
          * Creates a new {@link Builder} object from a {@link ThreadConfiguration} object.
          *
          * @param config the Border Router configurations to be copied
+         * @hide
          */
+        @FlaggedApi(Flags.FLAG_SET_NAT64_CONFIGURATION_ENABLED)
+        @SystemApi
         public Builder(@NonNull ThreadConfiguration config) {
             Objects.requireNonNull(config);
 
+            mBorderRouterEnabled = config.mBorderRouterEnabled;
             mNat64Enabled = config.mNat64Enabled;
             mDhcpv6PdEnabled = config.mDhcpv6PdEnabled;
+        }
+
+        /**
+         * Enables or disables this device as a Border Router.
+         *
+         * <p>Defaults to {@code true} if this method is not called.
+         *
+         * @see ThreadConfiguration#isBorderRouterEnabled
+         * @hide
+         */
+        @NonNull
+        public Builder setBorderRouterEnabled(boolean enabled) {
+            this.mBorderRouterEnabled = enabled;
+            return this;
         }
 
         /**
@@ -150,7 +208,11 @@ public final class ThreadConfiguration implements Parcelable {
          *
          * <p>Enabling this feature will allow Thread devices to connect to the internet/cloud over
          * IPv4.
+         *
+         * @hide
          */
+        @FlaggedApi(Flags.FLAG_SET_NAT64_CONFIGURATION_ENABLED)
+        @SystemApi
         @NonNull
         public Builder setNat64Enabled(boolean enabled) {
             this.mNat64Enabled = enabled;
@@ -162,6 +224,8 @@ public final class ThreadConfiguration implements Parcelable {
          *
          * <p>Enabling this feature will allow Thread devices to connect to the internet/cloud over
          * IPv6.
+         *
+         * @hide
          */
         @NonNull
         public Builder setDhcpv6PdEnabled(boolean enabled) {
@@ -169,7 +233,13 @@ public final class ThreadConfiguration implements Parcelable {
             return this;
         }
 
-        /** Creates a new {@link ThreadConfiguration} object. */
+        /**
+         * Creates a new {@link ThreadConfiguration} object.
+         *
+         * @hide
+         */
+        @FlaggedApi(Flags.FLAG_SET_NAT64_CONFIGURATION_ENABLED)
+        @SystemApi
         @NonNull
         public ThreadConfiguration build() {
             return new ThreadConfiguration(this);

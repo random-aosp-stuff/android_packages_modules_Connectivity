@@ -59,6 +59,9 @@
 #include "bpf/BpfUtils.h"
 #include "bpf_map_def.h"
 
+// The following matches bpf_helpers.h, which is only for inclusion in bpf code
+#define BPFLOADER_MAINLINE_VERSION 42u
+
 using android::base::EndsWith;
 using android::base::GetIntProperty;
 using android::base::GetProperty;
@@ -1154,7 +1157,10 @@ int loadProg(const char* const elfPath, const unsigned int bpfloader_ver,
         ALOGV("map_fd found at %d is %d in %s", i, mapFds[i].get(), elfPath);
 
     ret = readCodeSections(elfFile, cs);
-    if (ret == -ENOENT) return 0;  // no programs defined in this .o
+    // BPF .o's with no programs are only supported by mainline netbpfload,
+    // make sure .o's targeting non-mainline (ie. S) bpfloader don't show up.
+    if (ret == -ENOENT && bpfLoaderMinVer >= BPFLOADER_MAINLINE_VERSION)
+        return 0;
     if (ret) {
         ALOGE("Couldn't read all code sections in %s", elfPath);
         return ret;
@@ -1282,6 +1288,8 @@ static int writeProcSysFile(const char *filename, const char *value) {
 
 #define APEX_MOUNT_POINT "/apex/com.android.tethering"
 const char * const platformBpfLoader = "/system/bin/bpfloader";
+const char *const uprobestatsBpfLoader =
+    "/apex/com.android.uprobestats/bin/uprobestatsbpfload";
 
 static int logTetheringApexVersion(void) {
     char * found_blockdev = NULL;
@@ -1419,7 +1427,7 @@ static int doLoad(char** argv, char * const envp[]) {
     const bool has_platform_netbpfload_rc = exists("/system/etc/init/netbpfload.rc");
 
     // Version of Network BpfLoader depends on the Android OS version
-    unsigned int bpfloader_ver = 42u;    // [42] BPFLOADER_MAINLINE_VERSION
+    unsigned int bpfloader_ver = BPFLOADER_MAINLINE_VERSION;  // [42u]
     if (isAtLeastT) ++bpfloader_ver;     // [43] BPFLOADER_MAINLINE_T_VERSION
     if (isAtLeastU) ++bpfloader_ver;     // [44] BPFLOADER_MAINLINE_U_VERSION
     if (runningAsRoot) ++bpfloader_ver;  // [45] BPFLOADER_MAINLINE_U_QPR3_VERSION
@@ -1536,15 +1544,14 @@ static int doLoad(char** argv, char * const envp[]) {
      *
      * Additionally the 32-bit kernel jit support is poor,
      * and 32-bit userspace on 64-bit kernel bpf ringbuffer compatibility is broken.
+     * Note, however, that TV and Wear devices will continue to support 32-bit userspace
+     * on ARM64.
      */
     if (isUserspace32bit() && isAtLeastKernelVersion(6, 2, 0)) {
         // Stuff won't work reliably, but...
-        if (isTV()) {
-            // exempt TVs... they don't really need functional advanced networking
-            ALOGW("[TV] 32-bit userspace unsupported on 6.2+ kernels.");
-        } else if (isWear() && isArm()) {
-            // exempt Arm Wear devices (arm32 ABI is far less problematic than x86-32)
-            ALOGW("[Arm Wear] 32-bit userspace unsupported on 6.2+ kernels.");
+        if (isArm() && (isTV() || isWear())) {
+            // exempt Arm TV or Wear devices (arm32 ABI is far less problematic than x86-32)
+            ALOGW("[Arm TV/Wear] 32-bit userspace unsupported on 6.2+ kernels.");
         } else if (first_api_level <= __ANDROID_API_T__ && isArm()) {
             // also exempt Arm devices upgrading with major kernel rev from T-
             // might possibly be better for them to run with a newer kernel...
@@ -1558,8 +1565,8 @@ static int doLoad(char** argv, char * const envp[]) {
         }
     }
 
-    // Note: 6.6 is highest version supported by Android V (sdk=35), so this is for sdk=36+
-    if (isUserspace32bit() && isAtLeastKernelVersion(6, 7, 0)) {
+    // On handheld, 6.6 is highest version supported by Android V (sdk=35), so this is for sdk=36+
+    if (!isArm() && isUserspace32bit() && isAtLeastKernelVersion(6, 7, 0)) {
         ALOGE("64-bit userspace required on 6.7+ kernels.");
         return 1;
     }
@@ -1651,8 +1658,17 @@ static int doLoad(char** argv, char * const envp[]) {
     }
 
     // unreachable before U QPR3
-    ALOGI("done, transferring control to platform bpfloader.");
+    {
+      ALOGI("done, transferring control to uprobestatsbpfload.");
+      const char *args[] = {
+          uprobestatsBpfLoader,
+          NULL,
+      };
+      execve(args[0], (char **)args, envp);
+    }
 
+    ALOGI("unable to execute uprobestatsbpfload, transferring control to "
+          "platform bpfloader.");
     // platform BpfLoader *needs* to run as root
     const char * args[] = { platformBpfLoader, NULL, };
     execve(args[0], (char**)args, envp);

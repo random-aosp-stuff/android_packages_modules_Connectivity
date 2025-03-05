@@ -33,6 +33,10 @@ final class Config {
     private static final String PREFERENCES_FILE_NAME = "ct.preferences";
     static final File PREFERENCES_FILE = new File(DEVICE_PROTECTED_DATA_DIR, PREFERENCES_FILE_NAME);
 
+    // CT directory
+    static final String CT_ROOT_DIRECTORY_PATH = "/data/misc/keychain/ct/";
+    static final String COMPATIBILITY_VERSION = "v1";
+
     // Phenotype flags
     static final String NAMESPACE_NETWORK_SECURITY = "network_security";
     private static final String FLAGS_PREFIX = "CertificateTransparencyLogList__";
@@ -40,14 +44,20 @@ final class Config {
     static final String FLAG_CONTENT_URL = FLAGS_PREFIX + "content_url";
     static final String FLAG_METADATA_URL = FLAGS_PREFIX + "metadata_url";
     static final String FLAG_VERSION = FLAGS_PREFIX + "version";
+    static final String FLAG_PUBLIC_KEY = FLAGS_PREFIX + "public_key";
 
     // properties
-    static final String VERSION_PENDING = "version_pending";
     static final String VERSION = "version";
-    static final String CONTENT_URL_PENDING = "content_url_pending";
     static final String CONTENT_URL = "content_url";
-    static final String CONTENT_URL_KEY = "content_url_key";
-    static final String METADATA_URL_PENDING = "metadata_url_pending";
+    static final String CONTENT_DOWNLOAD_ID = "content_download_id";
     static final String METADATA_URL = "metadata_url";
-    static final String METADATA_URL_KEY = "metadata_url_key";
+    static final String METADATA_DOWNLOAD_ID = "metadata_download_id";
+    static final String PUBLIC_KEY_URL = "public_key_url";
+    static final String PUBLIC_KEY_DOWNLOAD_ID = "public_key_download_id";
+
+    // URLs
+    static final String URL_PREFIX = "https://www.gstatic.com/android/certificate_transparency/";
+    static final String URL_LOG_LIST = URL_PREFIX + "log_list.json";
+    static final String URL_SIGNATURE = URL_PREFIX + "log_list.sig";
+    static final String URL_PUBLIC_KEY = URL_PREFIX + "log_list.pub";
 }

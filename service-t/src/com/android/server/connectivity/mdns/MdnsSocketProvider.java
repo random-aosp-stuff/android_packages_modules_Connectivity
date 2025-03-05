@@ -19,12 +19,14 @@ package com.android.server.connectivity.mdns;
 import static android.net.NetworkCapabilities.TRANSPORT_CELLULAR;
 import static android.net.NetworkCapabilities.TRANSPORT_VPN;
 import static android.net.NetworkCapabilities.TRANSPORT_WIFI;
-import static com.android.server.connectivity.mdns.util.MdnsUtils.ensureRunningOnHandlerThread;
+
+import static com.android.net.module.util.HandlerUtils.ensureRunningOnHandlerThread;
 import static com.android.server.connectivity.mdns.util.MdnsUtils.isNetworkMatched;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresApi;
+import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -163,6 +165,7 @@ public class MdnsSocketProvider {
         this(context, looper, new Dependencies(), sharedLog, socketRequestMonitor);
     }
 
+    @SuppressLint("NewApi")
     MdnsSocketProvider(@NonNull Context context, @NonNull Looper looper,
             @NonNull Dependencies deps, @NonNull SharedLog sharedLog,
             @NonNull SocketRequestMonitor socketRequestMonitor) {
@@ -334,6 +337,7 @@ public class MdnsSocketProvider {
     }
 
     /*** Start monitoring sockets by listening callbacks for sockets creation or removal */
+    @SuppressLint("NewApi")
     public void startMonitoringSockets() {
         ensureRunningOnHandlerThread(mHandler);
         mRequestStop = false; // Reset stop request flag.
@@ -364,6 +368,7 @@ public class MdnsSocketProvider {
         }
     }
 
+    @SuppressLint("NewApi")
     private void maybeStopMonitoringSockets() {
         if (!mMonitoringSockets) return; // Already unregistered.
         if (!mRequestStop) return; // No stop request.

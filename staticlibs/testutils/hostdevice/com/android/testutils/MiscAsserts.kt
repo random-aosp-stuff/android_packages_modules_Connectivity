@@ -20,11 +20,14 @@ package com.android.testutils
 
 import com.android.testutils.FunctionalUtils.ThrowingRunnable
 import java.lang.reflect.Modifier
+import java.util.concurrent.TimeUnit
+import java.util.function.BooleanSupplier
 import kotlin.system.measureTimeMillis
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 private const val TAG = "Connectivity unit test"
 
@@ -118,4 +121,25 @@ fun <T> assertSameElements(expected: List<T>, actual: List<T>) {
     val actualSet: HashSet<T> = HashSet(actual)
     assertEquals(actualSet.size, actual.size, "actual list contains duplicates")
     assertEquals(expectedSet, actualSet)
+}
+
+@JvmOverloads
+fun assertEventuallyTrue(
+    descr: String,
+    timeoutMs: Long,
+    pollIntervalMs: Long = 10L,
+    fn: BooleanSupplier
+) {
+    // This should use SystemClock.elapsedRealtime() since nanoTime does not include time in deep
+    // sleep, but this is a host-device library and SystemClock is Android-specific (not available
+    // on host). When waiting for a condition during tests the device would generally not go into
+    // deep sleep, and the polling sleep would go over the timeout anyway in that case, so this is
+    // fine.
+    val limit = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+    while (!fn.asBoolean) {
+        if (System.nanoTime() > limit) {
+            fail(descr)
+        }
+        Thread.sleep(pollIntervalMs)
+    }
 }

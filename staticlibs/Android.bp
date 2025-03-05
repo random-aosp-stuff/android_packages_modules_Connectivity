@@ -32,6 +32,8 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
+// This library shouldn't be used anymore (no class should be added), and per-user libraries like
+// net-utils-service-connectivity or net-utils-framework-wifi should be used instead.
 java_library {
     name: "net-utils-device-common",
     srcs: [
@@ -435,6 +437,7 @@ java_library {
     sdk_version: "core_platform",
     srcs: [
         "device/com/android/net/module/util/FdEventsReader.java",
+        "device/com/android/net/module/util/HandlerUtils.java",
         "device/com/android/net/module/util/SharedLog.java",
         "framework/com/android/net/module/util/ByteUtils.java",
         "framework/com/android/net/module/util/CollectionUtils.java",
@@ -625,6 +628,31 @@ filegroup {
     visibility: ["//visibility:private"],
 }
 
+// Filegroup to build lib used by IPsec/IKE framework
+// Any class here *must* have a corresponding jarjar rule in the IPsec build rules.
+filegroup {
+    name: "net-utils-framework-ipsec-common-srcs",
+    srcs: [
+        "framework/com/android/net/module/util/HexDump.java",
+    ],
+    path: "framework",
+    visibility: ["//visibility:private"],
+}
+
+java_library {
+    name: "net-utils-framework-ipsec",
+    sdk_version: "module_current",
+    min_sdk_version: "30",
+    srcs: [":net-utils-framework-ipsec-common-srcs"],
+    libs: [
+        "androidx.annotation_annotation",
+    ],
+    visibility: [
+        "//packages/modules/IPsec",
+    ],
+    apex_available: ["com.android.ipsec"],
+}
+
 // Use a file group containing classes necessary for framework-connectivity. The file group should
 // be as small as possible because because the classes end up in the bootclasspath and R8 is not
 // used to remove unused classes.
@@ -645,6 +673,8 @@ filegroup {
     visibility: ["//visibility:private"],
 }
 
+// Sources outside of com.android.net.module.util should not be added because many modules depend on
+// them and need jarjar rules
 filegroup {
     name: "net-utils-all-srcs",
     srcs: [
@@ -696,4 +726,35 @@ java_library {
         "//packages/modules/Wifi/framework",
     ],
     apex_available: ["com.android.wifi"],
+}
+
+genrule {
+    name: "statslog-framework-connectivity-java-gen",
+    tools: ["stats-log-api-gen"],
+    cmd: "$(location stats-log-api-gen) --java $(out) --module connectivity --javaPackage com.android.net.module.util --javaClass FrameworkConnectivityStatsLog",
+    out: ["com/android/net/module/util/FrameworkConnectivityStatsLog.java"],
+}
+
+java_library {
+    name: "net-utils-service-vcn",
+    sdk_version: "module_current",
+    min_sdk_version: "30",
+    srcs: [
+        "device/com/android/net/module/util/HandlerUtils.java",
+    ],
+    libs: [
+        "framework-annotations-lib",
+    ],
+    visibility: [
+        // TODO: b/374174952 Remove it when VCN modularization is released
+        "//frameworks/base/packages/Vcn/service-b",
+
+        "//packages/modules/Connectivity/service-b",
+    ],
+    apex_available: [
+        // TODO: b/374174952 Remove it when VCN modularization is released
+        "//apex_available:platform",
+
+        "com.android.tethering",
+    ],
 }

@@ -62,7 +62,6 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkTemplate;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.os.Looper;
 import android.stats.connectivity.DownstreamType;
 import android.stats.connectivity.ErrorCode;
 import android.stats.connectivity.UpstreamType;
@@ -76,6 +75,7 @@ import androidx.annotation.VisibleForTesting;
 
 import com.android.modules.utils.build.SdkLevel;
 import com.android.net.module.util.DeviceConfigUtils;
+import com.android.net.module.util.HandlerUtils;
 import com.android.networkstack.tethering.UpstreamNetworkState;
 
 import java.util.ArrayList;
@@ -111,7 +111,11 @@ public class TetheringMetrics {
     private final SparseArray<NetworkTetheringReported.Builder> mBuilderMap = new SparseArray<>();
     private final SparseArray<Long> mDownstreamStartTime = new SparseArray<Long>();
     private final ArrayList<RecordUpstreamEvent> mUpstreamEventList = new ArrayList<>();
-    private final ArrayMap<UpstreamType, DataUsage> mUpstreamUsageBaseline = new ArrayMap<>();
+    // Store the last reported data usage for each upstream type to be used for calculating the
+    // usage delta. The keys are the upstream types, and the values are the tethering UID data
+    // usage for the corresponding types. Retrieve the baseline data usage when tethering is
+    // enabled, update it when the upstream changes, and clear it when tethering is disabled.
+    private final ArrayMap<UpstreamType, DataUsage> mLastReportedUpstreamUsage = new ArrayMap<>();
     private final Context mContext;
     private final Dependencies mDependencies;
     private final NetworkStatsManager mNetworkStatsManager;
@@ -157,10 +161,15 @@ public class TetheringMetrics {
 
         /**
          * @see Handler
+         *
+         * Note: This should only be called once, within the constructor, as it creates a new
+         * thread. Calling it multiple times could lead to a thread leak.
          */
         @NonNull
-        public Handler createHandler(Looper looper) {
-            return new Handler(looper);
+        public Handler createHandler() {
+            final HandlerThread thread = new HandlerThread(TAG);
+            thread.start();
+            return new Handler(thread.getLooper());
         }
     }
 
@@ -177,9 +186,7 @@ public class TetheringMetrics {
         mContext = context;
         mDependencies = dependencies;
         mNetworkStatsManager = mContext.getSystemService(NetworkStatsManager.class);
-        final HandlerThread thread = new HandlerThread(TAG);
-        thread.start();
-        mHandler = dependencies.createHandler(thread.getLooper());
+        mHandler = dependencies.createHandler();
     }
 
     @VisibleForTesting
@@ -282,22 +289,33 @@ public class TetheringMetrics {
      * Calculates the data usage difference between the current and previous usage for the
      * specified upstream type.
      *
+     * Note: This must be called before updating mCurrentUpstream when changing the upstream.
+     *
      * @return A DataUsage object containing the calculated difference in transmitted (tx) and
      *         received (rx) bytes.
      */
     private DataUsage calculateDataUsageDelta(@Nullable UpstreamType upstream) {
-        if (upstream != null && mDependencies.isUpstreamDataUsageMetricsEnabled(mContext)
-                && isUsageSupportedForUpstreamType(upstream)) {
-            final DataUsage oldUsage = mUpstreamUsageBaseline.getOrDefault(upstream, EMPTY);
-            if (oldUsage.equals(EMPTY)) {
-                Log.d(TAG, "No usage baseline for the upstream=" + upstream);
-                return EMPTY;
-            }
-            // TODO(b/352537247): Fix data usage which might be incorrect if the device uses
-            //  tethering with the same upstream for over 15 days.
-            return DataUsage.subtract(getCurrentDataUsageForUpstreamType(upstream), oldUsage);
+        if (!mDependencies.isUpstreamDataUsageMetricsEnabled(mContext)) {
+            return EMPTY;
         }
-        return EMPTY;
+
+        if (upstream == null || !isUsageSupportedForUpstreamType(upstream)) {
+            return EMPTY;
+        }
+
+        final DataUsage oldUsage = mLastReportedUpstreamUsage.getOrDefault(upstream, EMPTY);
+        if (oldUsage.equals(EMPTY)) {
+            Log.d(TAG, "No usage baseline for the upstream=" + upstream);
+            return EMPTY;
+        }
+        // TODO(b/370724247): Fix data usage which might be incorrect if the device uses
+        //  tethering with the same upstream for over 15 days.
+        // Need to refresh the baseline usage data. If the network switches back to Wi-Fi after
+        // using cellular data (Wi-Fi -> Cellular -> Wi-Fi), the old baseline might be
+        // inaccurate, leading to incorrect delta calculations.
+        final DataUsage newUsage = getCurrentDataUsageForUpstreamType(upstream);
+        mLastReportedUpstreamUsage.put(upstream, newUsage);
+        return DataUsage.subtract(newUsage, oldUsage);
     }
 
     /**
@@ -416,7 +434,6 @@ public class TetheringMetrics {
      * @param reported a NetworkTetheringReported object containing statistics to write
      */
     private void write(@NonNull final NetworkTetheringReported reported) {
-        final byte[] upstreamEvents = reported.getUpstreamEvents().toByteArray();
         mDependencies.write(reported);
         if (DBG) {
             Log.d(
@@ -430,7 +447,7 @@ public class TetheringMetrics {
                     + ", userType: "
                     + reported.getUserType().getNumber()
                     + ", upstreamTypes: "
-                    + Arrays.toString(upstreamEvents)
+                    + Arrays.toString(reported.getUpstreamEvents().toByteArray())
                     + ", durationMillis: "
                     + reported.getDurationMillis());
         }
@@ -444,25 +461,26 @@ public class TetheringMetrics {
     }
 
     private void handleInitUpstreamUsageBaseline() {
-        if (!(mDependencies.isUpstreamDataUsageMetricsEnabled(mContext)
-                && mUpstreamUsageBaseline.isEmpty())) {
+        if (!mDependencies.isUpstreamDataUsageMetricsEnabled(mContext)) {
+            return;
+        }
+
+        if (!mLastReportedUpstreamUsage.isEmpty()) {
+            Log.wtf(TAG, "The upstream usage baseline has been initialed.");
             return;
         }
 
         for (UpstreamType type : UpstreamType.values()) {
             if (!isUsageSupportedForUpstreamType(type)) continue;
-            mUpstreamUsageBaseline.put(type, getCurrentDataUsageForUpstreamType(type));
+            mLastReportedUpstreamUsage.put(type, getCurrentDataUsageForUpstreamType(type));
         }
     }
 
     @VisibleForTesting
     @NonNull
-    DataUsage getDataUsageFromUpstreamType(@NonNull UpstreamType type) {
-        if (mHandler.getLooper().getThread() != Thread.currentThread()) {
-            throw new IllegalStateException(
-                    "Not running on Handler thread: " + Thread.currentThread().getName());
-        }
-        return mUpstreamUsageBaseline.getOrDefault(type, EMPTY);
+    DataUsage getLastReportedUsageFromUpstreamType(@NonNull UpstreamType type) {
+        HandlerUtils.ensureRunningOnHandlerThread(mHandler);
+        return mLastReportedUpstreamUsage.getOrDefault(type, EMPTY);
     }
 
 
@@ -497,7 +515,7 @@ public class TetheringMetrics {
         mUpstreamEventList.clear();
         mCurrentUpstream = null;
         mCurrentUpStreamStartTime = 0L;
-        mUpstreamUsageBaseline.clear();
+        mLastReportedUpstreamUsage.clear();
     }
 
     private DownstreamType downstreamTypeToEnum(final int ifaceType) {

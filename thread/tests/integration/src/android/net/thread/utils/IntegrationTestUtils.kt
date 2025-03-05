@@ -32,14 +32,21 @@ import android.net.TestNetworkInterface
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.thread.ActiveOperationalDataset
+import android.net.thread.ThreadConfiguration
 import android.net.thread.ThreadNetworkController
 import android.os.Build
 import android.os.Handler
 import android.os.SystemClock
 import android.system.OsConstants
+import android.system.OsConstants.IPPROTO_ICMP
 import androidx.test.core.app.ApplicationProvider
 import com.android.compatibility.common.util.SystemUtil.runShellCommandOrThrow
+import com.android.net.module.util.IpUtils
 import com.android.net.module.util.NetworkStackConstants
+import com.android.net.module.util.NetworkStackConstants.ICMP_CHECKSUM_OFFSET
+import com.android.net.module.util.NetworkStackConstants.IPV4_CHECKSUM_OFFSET
+import com.android.net.module.util.NetworkStackConstants.IPV4_HEADER_MIN_LEN
+import com.android.net.module.util.NetworkStackConstants.IPV4_LENGTH_OFFSET
 import com.android.net.module.util.Struct
 import com.android.net.module.util.structs.Icmpv4Header
 import com.android.net.module.util.structs.Icmpv6Header
@@ -47,7 +54,7 @@ import com.android.net.module.util.structs.Ipv4Header
 import com.android.net.module.util.structs.Ipv6Header
 import com.android.net.module.util.structs.PrefixInformationOption
 import com.android.net.module.util.structs.RaHeader
-import com.android.testutils.TapPacketReader
+import com.android.testutils.PollPacketReader
 import com.android.testutils.TestNetworkTracker
 import com.android.testutils.initTestNetwork
 import com.android.testutils.runAsShell
@@ -108,6 +115,9 @@ object IntegrationTestUtils {
     val DEFAULT_DATASET: ActiveOperationalDataset =
         ActiveOperationalDataset.fromThreadTlvs(DEFAULT_DATASET_TLVS)
 
+    @JvmField
+    val DEFAULT_CONFIG = ThreadConfiguration.Builder().build()
+
     /**
      * Waits for the given [Supplier] to be true until given timeout.
      *
@@ -136,18 +146,18 @@ object IntegrationTestUtils {
     }
 
     /**
-     * Creates a [TapPacketReader] given the [TestNetworkInterface] and [Handler].
+     * Creates a [PollPacketReader] given the [TestNetworkInterface] and [Handler].
      *
      * @param testNetworkInterface the TUN interface of the test network
      * @param handler the handler to process the packets
-     * @return the [TapPacketReader]
+     * @return the [PollPacketReader]
      */
     @JvmStatic
     fun newPacketReader(
         testNetworkInterface: TestNetworkInterface, handler: Handler
-    ): TapPacketReader {
+    ): PollPacketReader {
         val fd = testNetworkInterface.fileDescriptor.fileDescriptor
-        val reader = TapPacketReader(handler, fd, testNetworkInterface.mtu)
+        val reader = PollPacketReader(handler, fd, testNetworkInterface.mtu)
         handler.post { reader.start() }
         handler.waitForIdle(timeoutMs = 5000)
         return reader
@@ -191,7 +201,7 @@ object IntegrationTestUtils {
     }
 
     /**
-     * Polls for a packet from a given [TapPacketReader] that satisfies the `filter`.
+     * Polls for a packet from a given [PollPacketReader] that satisfies the `filter`.
      *
      * @param packetReader a TUN packet reader
      * @param filter the filter to be applied on the packet
@@ -199,7 +209,7 @@ object IntegrationTestUtils {
      * than 3000ms to read the next packet, the method will return null
      */
     @JvmStatic
-    fun pollForPacket(packetReader: TapPacketReader, filter: Predicate<ByteArray>): ByteArray? {
+    fun pollForPacket(packetReader: PollPacketReader, filter: Predicate<ByteArray>): ByteArray? {
         var packet: ByteArray?
         while ((packetReader.poll(3000 /* timeoutMs */, filter).also { packet = it }) != null) {
             return packet
@@ -303,6 +313,73 @@ object IntegrationTestUtils {
         return null
     }
 
+    /** Builds an ICMPv4 Echo Reply packet to respond to the given ICMPv4 Echo Request packet. */
+    @JvmStatic
+    fun buildIcmpv4EchoReply(request: ByteBuffer): ByteBuffer? {
+        val requestIpv4Header = Struct.parse(Ipv4Header::class.java, request) ?: return null
+        val requestIcmpv4Header = Struct.parse(Icmpv4Header::class.java, request) ?: return null
+
+        val id = request.getShort()
+        val seq = request.getShort()
+
+        val payload = ByteBuffer.allocate(4 + request.limit() - request.position())
+        payload.putShort(id)
+        payload.putShort(seq)
+        payload.put(request)
+        payload.rewind()
+
+        val ipv4HeaderLen = Struct.getSize(Ipv4Header::class.java)
+        val Icmpv4HeaderLen = Struct.getSize(Icmpv4Header::class.java)
+        val payloadLen = payload.limit();
+
+        val reply = ByteBuffer.allocate(ipv4HeaderLen + Icmpv4HeaderLen + payloadLen)
+
+        // IPv4 header
+        val replyIpv4Header = Ipv4Header(
+            0 /* TYPE OF SERVICE */,
+            0.toShort().toInt()/* totalLength, calculate later */,
+            requestIpv4Header.id,
+            requestIpv4Header.flagsAndFragmentOffset,
+            0x40 /* ttl */,
+            IPPROTO_ICMP.toByte(),
+            0.toShort()/* checksum, calculate later */,
+            requestIpv4Header.dstIp /* srcIp */,
+            requestIpv4Header.srcIp /* dstIp */
+        )
+        replyIpv4Header.writeToByteBuffer(reply)
+
+        // ICMPv4 header
+        val replyIcmpv4Header = Icmpv4Header(
+            0 /* type, ICMP_ECHOREPLY */,
+            requestIcmpv4Header.code,
+            0.toShort() /* checksum, calculate later */
+        )
+        replyIcmpv4Header.writeToByteBuffer(reply)
+
+        // Payload
+        reply.put(payload)
+        reply.flip()
+
+        // Populate the IPv4 totalLength field.
+        reply.putShort(
+            IPV4_LENGTH_OFFSET, (ipv4HeaderLen + Icmpv4HeaderLen + payloadLen).toShort()
+        )
+
+        // Populate the IPv4 header checksum field.
+        reply.putShort(
+            IPV4_CHECKSUM_OFFSET, IpUtils.ipChecksum(reply, 0 /* headerOffset */)
+        )
+
+        // Populate the ICMP checksum field.
+        reply.putShort(
+            IPV4_HEADER_MIN_LEN + ICMP_CHECKSUM_OFFSET, IpUtils.icmpChecksum(
+                reply, IPV4_HEADER_MIN_LEN, Icmpv4HeaderLen + payloadLen
+            )
+        )
+
+        return reply
+    }
+
     /** Returns the Prefix Information Options (PIO) extracted from an ICMPv6 RA message.  */
     @JvmStatic
     fun getRaPios(raMsg: ByteArray?): List<PrefixInformationOption> {
@@ -311,7 +388,12 @@ object IntegrationTestUtils {
         raMsg ?: return pioList
 
         val buf = ByteBuffer.wrap(raMsg)
-        val ipv6Header = Struct.parse(Ipv6Header::class.java, buf)
+        val ipv6Header = try {
+            Struct.parse(Ipv6Header::class.java, buf)
+        } catch (e: IllegalArgumentException) {
+            // the packet is not IPv6
+            return pioList
+        }
         if (ipv6Header.nextHeader != OsConstants.IPPROTO_ICMPV6.toByte()) {
             return pioList
         }
@@ -513,6 +595,27 @@ object IntegrationTestUtils {
         return ftd.omrAddress
     }
 
+    /** Enables Thread and joins the specified Thread network. */
+    @JvmStatic
+    fun enableThreadAndJoinNetwork(dataset: ActiveOperationalDataset) {
+        // TODO: b/323301831 - This is a workaround to avoid unnecessary delay to re-form a network
+        OtDaemonController().factoryReset();
+
+        val context: Context = requireNotNull(ApplicationProvider.getApplicationContext());
+        val controller = requireNotNull(ThreadNetworkControllerWrapper.newInstance(context));
+        controller.setEnabledAndWait(true);
+        controller.joinAndWait(dataset);
+    }
+
+    /** Leaves the Thread network and disables Thread. */
+    @JvmStatic
+    fun leaveNetworkAndDisableThread() {
+        val context: Context = requireNotNull(ApplicationProvider.getApplicationContext());
+        val controller = requireNotNull(ThreadNetworkControllerWrapper.newInstance(context));
+        controller.leaveAndWait();
+        controller.setEnabledAndWait(false);
+    }
+
     private open class DefaultDiscoveryListener : NsdManager.DiscoveryListener {
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {}
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
@@ -551,54 +654,11 @@ object IntegrationTestUtils {
         )
     }
 
-    private fun defaultLinkProperties(): LinkProperties {
-        val lp = LinkProperties()
-        // TODO: use a fake DNS server
-        lp.setDnsServers(listOf(parseNumericAddress("8.8.8.8")))
-        // NAT64 feature requires the infra network to have an IPv4 default route.
-        lp.addRoute(
-            RouteInfo(
-                IpPrefix("0.0.0.0/0") /* destination */,
-                null /* gateway */,
-                null /* iface */,
-                RouteInfo.RTN_UNICAST, 1500 /* mtu */
-            )
-        )
-        return lp
-    }
-
+    /**
+     * Stop the ot-daemon by shell command.
+     */
     @JvmStatic
-    @JvmOverloads
-    fun startInfraDeviceAndWaitForOnLinkAddr(
-        tapPacketReader: TapPacketReader,
-        macAddress: MacAddress = MacAddress.fromString("1:2:3:4:5:6")
-    ): InfraNetworkDevice {
-        val infraDevice = InfraNetworkDevice(macAddress, tapPacketReader)
-        infraDevice.runSlaac(Duration.ofSeconds(60))
-        requireNotNull(infraDevice.ipv6Addr)
-        return infraDevice
-    }
-
-    @JvmStatic
-    @JvmOverloads
-    @Throws(java.lang.Exception::class)
-    fun setUpInfraNetwork(
-        context: Context,
-        controller: ThreadNetworkControllerWrapper,
-        lp: LinkProperties = defaultLinkProperties()
-    ): TestNetworkTracker {
-        val infraNetworkTracker: TestNetworkTracker =
-            runAsShell(
-                MANAGE_TEST_NETWORKS,
-                supplier = { initTestNetwork(context, lp, setupTimeoutMs = 5000) })
-        val infraNetworkName: String = infraNetworkTracker.testIface.getInterfaceName()
-        controller.setTestNetworkAsUpstreamAndWait(infraNetworkName)
-
-        return infraNetworkTracker
-    }
-
-    @JvmStatic
-    fun tearDownInfraNetwork(testNetworkTracker: TestNetworkTracker) {
-        runAsShell(MANAGE_TEST_NETWORKS) { testNetworkTracker.teardown() }
+    fun stopOtDaemon() {
+        runShellCommandOrThrow("stop ot-daemon")
     }
 }

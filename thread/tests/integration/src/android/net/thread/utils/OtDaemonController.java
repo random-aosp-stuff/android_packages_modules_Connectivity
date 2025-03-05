@@ -54,6 +54,16 @@ public final class OtDaemonController {
         SystemClock.sleep(500);
     }
 
+    /** Returns the output string of the "ot-ctl br state" command. */
+    public String getBorderRoutingState() {
+        return executeCommandAndParse("br state").getFirst();
+    }
+
+    /** Returns the output string of the "ot-ctl srp server state" command. */
+    public String getSrpServerState() {
+        return executeCommandAndParse("srp server state").getFirst();
+    }
+
     /** Returns the list of IPv6 addresses on ot-daemon. */
     public List<Inet6Address> getAddresses() {
         return executeCommandAndParse("ipaddr").stream()
@@ -132,6 +142,18 @@ public final class OtDaemonController {
     public void addPrefixInNetworkData(IpPrefix ipPrefix, String flags, String preference) {
         executeCommand("prefix add " + ipPrefix + " " + flags + " " + preference);
         executeCommand("netdata register");
+    }
+
+    public int getTrelPort() {
+        return Integer.parseInt(executeCommandAndParse("trel port").get(0));
+    }
+
+    public String getExtendedAddr() {
+        return executeCommandAndParse("extaddr").get(0);
+    }
+
+    public String getExtendedPanId() {
+        return executeCommandAndParse("extpanid").get(0);
     }
 
     public String executeCommand(String cmd) {

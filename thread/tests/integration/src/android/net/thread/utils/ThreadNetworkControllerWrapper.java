@@ -29,6 +29,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.thread.ActiveOperationalDataset;
+import android.net.thread.ThreadConfiguration;
 import android.net.thread.ThreadNetworkController;
 import android.net.thread.ThreadNetworkController.StateCallback;
 import android.net.thread.ThreadNetworkException;
@@ -36,10 +37,12 @@ import android.net.thread.ThreadNetworkManager;
 import android.os.OutcomeReceiver;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 /** A helper class which provides synchronous API wrappers for {@link ThreadNetworkController}. */
 public final class ThreadNetworkControllerWrapper {
@@ -47,8 +50,12 @@ public final class ThreadNetworkControllerWrapper {
     public static final Duration LEAVE_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration CALLBACK_TIMEOUT = Duration.ofSeconds(1);
     private static final Duration SET_ENABLED_TIMEOUT = Duration.ofSeconds(2);
+    private static final Duration CONFIG_TIMEOUT = Duration.ofSeconds(1);
 
     private final ThreadNetworkController mController;
+
+    private final List<Integer> mDeviceRoleUpdates = new ArrayList<>();
+    @Nullable private StateCallback mStateCallback;
 
     /**
      * Returns a new {@link ThreadNetworkControllerWrapper} instance or {@code null} if Thread
@@ -65,6 +72,15 @@ public final class ThreadNetworkControllerWrapper {
 
     private ThreadNetworkControllerWrapper(ThreadNetworkController controller) {
         mController = controller;
+    }
+
+    /**
+     * Returns the underlying {@link ThreadNetworkController} object or {@code null} if the current
+     * platform doesn't support it.
+     */
+    @Nullable
+    public ThreadNetworkController get() {
+        return mController;
     }
 
     /**
@@ -189,6 +205,36 @@ public final class ThreadNetworkControllerWrapper {
                             networkInterfaceName, directExecutor(), future::complete);
                 });
         future.get(CALLBACK_TIMEOUT.toSeconds(), SECONDS);
+    }
+
+    public ThreadConfiguration getConfiguration() throws Exception {
+        CompletableFuture<ThreadConfiguration> future = new CompletableFuture<>();
+        Consumer<ThreadConfiguration> callback = future::complete;
+        runAsShell(
+                PERMISSION_THREAD_NETWORK_PRIVILEGED,
+                () -> mController.registerConfigurationCallback(directExecutor(), callback));
+        future.get(CONFIG_TIMEOUT.toSeconds(), SECONDS);
+        runAsShell(
+                PERMISSION_THREAD_NETWORK_PRIVILEGED,
+                () -> mController.unregisterConfigurationCallback(callback));
+        return future.getNow(null);
+    }
+
+    public void setConfigurationAndWait(ThreadConfiguration config) throws Exception {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        runAsShell(
+                PERMISSION_THREAD_NETWORK_PRIVILEGED,
+                () ->
+                        mController.setConfiguration(
+                                config, directExecutor(), newOutcomeReceiver(future)));
+        future.get(CONFIG_TIMEOUT.toSeconds(), SECONDS);
+    }
+
+    public void setNat64EnabledAndWait(boolean enabled) throws Exception {
+        final ThreadConfiguration config = getConfiguration();
+        final ThreadConfiguration newConfig =
+                new ThreadConfiguration.Builder(config).setNat64Enabled(enabled).build();
+        setConfigurationAndWait(newConfig);
     }
 
     private static <V> OutcomeReceiver<V, ThreadNetworkException> newOutcomeReceiver(

@@ -83,6 +83,69 @@ def get_apf_counters_from_dumpsys(
   ad.log.debug("Getting apf counters: " + str(result))
   return result
 
+def get_ipv4_addresses(
+    ad: android_device.AndroidDevice, iface_name: str
+) -> list[str]:
+  """Retrieves the IPv4 addresses of a given interface on an Android device.
+
+  This function executes an ADB shell command (`ip -4 address show`) to get the
+  network interface information and extracts the IPv4 address from the output.
+  If devices have no IPv4 address, raise PatternNotFoundException.
+
+  Args:
+      ad: The Android device object.
+      iface_name: The name of the network interface (e.g., "wlan0").
+
+  Returns:
+      The IPv4 addresses of the interface as a list of string.
+      Return empty list if no IPv4 address.
+  """
+  # output format:
+  # 54: wlan2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+  #     inet 192.168.195.162/24 brd 192.168.195.255 scope global wlan2
+  #         valid_lft forever preferred_lft forever
+  #     inet 192.168.1.1/24 brd 192.168.1.255 scope global wlan2
+  #         valid_lft forever preferred_lft forever
+  output = adb_utils.adb_shell(ad, f"ip -4 address show {iface_name}")
+  pattern = r"inet\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/\d+"
+  matches = re.findall(pattern, output)
+
+  if matches:
+    return matches
+  else:
+    return []
+
+def get_ipv6_addresses(
+    ad: android_device.AndroidDevice, iface_name: str
+) -> list[str]:
+  """Retrieves the IPv6 addresses of a given interface on an Android device.
+
+  This function executes an ADB shell command (`ip -6 address show`) to get the
+  network interface information and extracts the IPv6 address from the output.
+  If devices have no IPv6 address, raise PatternNotFoundException.
+
+  Args:
+      ad: The Android device object.
+      iface_name: The name of the network interface (e.g., "wlan0").
+
+  Returns:
+      The IPv6 addresses of the interface as a list of string.
+      Return empty list if no IPv6 address.
+  """
+  # output format
+  # 54: wlan2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP qlen 1000
+  #     inet6 fe80::10a3:5dff:fe52:de32/64 scope link
+  #         valid_lft forever preferred_lft forever
+  #     inet6 fe80::1233:aadb:3d32:1234/64 scope link
+  #         valid_lft forever preferred_lft forever
+  output = adb_utils.adb_shell(ad, f"ip -6 address show {iface_name}")
+  pattern = r"inet6\s+([0-9a-fA-F:]+)\/\d+"
+  matches = re.findall(pattern, output)
+
+  if matches:
+    return matches
+  else:
+    return []
 
 def get_hardware_address(
     ad: android_device.AndroidDevice, iface_name: str
@@ -115,6 +178,30 @@ def get_hardware_address(
         "Cannot get hardware address for " + iface_name
     )
 
+def is_packet_capture_supported(
+        ad: android_device.AndroidDevice,
+) -> bool:
+
+  try:
+    # Invoke the shell command with empty argument and see how NetworkStack respond.
+    # If supported, an IllegalArgumentException with help page will be printed.
+    assert_utils.expect_throws(
+      lambda: start_capture_packets(ad, ""),
+      assert_utils.UnexpectedBehaviorError
+    )
+    assert_utils.expect_throws(
+      lambda: stop_capture_packets(ad, ""),
+      assert_utils.UnexpectedBehaviorError
+    )
+    assert_utils.expect_throws(
+      lambda: get_matched_packet_counts(ad, "", ""),
+      assert_utils.UnexpectedBehaviorError
+    )
+  except assert_utils.UnexpectedExceptionError:
+    return False
+
+  # If no UnsupportOperationException is thrown, regard it as supported
+  return True
 
 def is_send_raw_packet_downstream_supported(
     ad: android_device.AndroidDevice,
@@ -161,25 +248,92 @@ def send_raw_packet_downstream(
         representation of a packet starting from L2 header.
   """
 
-  cmd = (
-      "cmd network_stack send-raw-packet-downstream"
-      f" {iface_name} {packet_in_hex}"
-  )
+  cmd = f"cmd network_stack send-raw-packet-downstream {iface_name} {packet_in_hex}"
 
   # Expect no output or Unknown command if NetworkStack is too old. Throw otherwise.
-  try:
-    output = adb_utils.adb_shell(ad, cmd)
-  except AdbError as e:
-    output = str(e.stdout)
-  if output:
-    if "Unknown command" in output:
-      raise UnsupportedOperationException(
-          "send-raw-packet-downstream command is not supported."
-      )
+  adb_output = AdbOutputHandler(ad, cmd).get_output()
+  if adb_output:
     raise assert_utils.UnexpectedBehaviorError(
-        f"Got unexpected output: {output} for command: {cmd}."
+      f"Got unexpected output: {adb_output} for command: {cmd}."
     )
 
+def start_capture_packets(
+        ad: android_device.AndroidDevice,
+        iface_name: str
+) -> None:
+  """Starts packet capturing on a specified network interface.
+
+  This function initiates packet capture on the given network interface of an
+  Android device using an ADB shell command. It handles potential errors
+  related to unsupported commands or unexpected output.
+  This command only supports downstream tethering interface.
+
+  Args:
+    ad: The Android device object.
+    iface_name: The name of the network interface (e.g., "wlan0").
+  """
+  cmd = f"cmd network_stack capture start {iface_name}"
+
+  # Expect no output or Unknown command if NetworkStack is too old. Throw otherwise.
+  adb_output = AdbOutputHandler(ad, cmd).get_output()
+  if adb_output != "success":
+    raise assert_utils.UnexpectedBehaviorError(
+      f"Got unexpected output: {adb_output} for command: {cmd}."
+    )
+
+def stop_capture_packets(
+        ad: android_device.AndroidDevice,
+        iface_name: str
+) -> None:
+  """Stops packet capturing on a specified network interface.
+
+  This function terminates packet capture on the given network interface of an
+  Android device using an ADB shell command. It handles potential errors
+  related to unsupported commands or unexpected output.
+
+  Args:
+    ad: The Android device object.
+    iface_name: The name of the network interface (e.g., "wlan0").
+  """
+  cmd = f"cmd network_stack capture stop {iface_name}"
+
+  # Expect no output or Unknown command if NetworkStack is too old. Throw otherwise.
+  adb_output = AdbOutputHandler(ad, cmd).get_output()
+  if adb_output != "success":
+    raise assert_utils.UnexpectedBehaviorError(
+      f"Got unexpected output: {adb_output} for command: {cmd}."
+    )
+
+def get_matched_packet_counts(
+        ad: android_device.AndroidDevice,
+        iface_name: str,
+        packet_in_hex: str
+) -> int:
+  """Gets the number of captured packets matching a specific hexadecimal pattern.
+
+  This function retrieves the count of captured packets on the specified
+  network interface that match a given hexadecimal pattern. It uses an ADB
+  shell command and handles potential errors related to unsupported commands,
+  unexpected output, or invalid output format.
+
+  Args:
+    ad: The Android device object.
+    iface_name: The name of the network interface (e.g., "wlan0").
+    packet_in_hex: The hexadecimal string representing the packet pattern.
+
+  Returns:
+    The number of matched packets as an integer.
+  """
+  cmd = f"cmd network_stack capture matched-packet-counts {iface_name} {packet_in_hex}"
+
+  # Expect no output or Unknown command if NetworkStack is too old. Throw otherwise.
+  adb_output = AdbOutputHandler(ad, cmd).get_output()
+  try:
+    return int(adb_output)
+  except ValueError as e:
+    raise assert_utils.UnexpectedBehaviorError(
+      f"Got unexpected exception: {e} for command: {cmd}."
+    )
 
 @dataclass
 class ApfCapabilities:
@@ -241,3 +395,19 @@ def assume_apf_version_support_at_least(
       f"Supported apf version {caps.apf_version_supported} < expected version"
       f" {expected_version}",
   )
+
+class AdbOutputHandler:
+  def __init__(self, ad, cmd):
+    self._ad = ad
+    self._cmd = cmd
+
+  def get_output(self) -> str:
+    try:
+      return adb_utils.adb_shell(self._ad, self._cmd)
+    except AdbError as e:
+      output = str(e.stdout)
+      if "Unknown command" in output:
+        raise UnsupportedOperationException(
+          f"{self._cmd} is not supported."
+        )
+      return output

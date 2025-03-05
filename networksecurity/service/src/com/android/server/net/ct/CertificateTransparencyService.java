@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package com.android.server.net.ct;
 
 import android.annotation.RequiresApi;
@@ -29,19 +30,35 @@ import com.android.server.SystemService;
 public class CertificateTransparencyService extends ICertificateTransparencyManager.Stub {
 
     private final CertificateTransparencyFlagsListener mFlagsListener;
+    private final CertificateTransparencyJob mCertificateTransparencyJob;
 
     /**
      * @return true if the CertificateTransparency service is enabled.
      */
     public static boolean enabled(Context context) {
         return DeviceConfig.getBoolean(
-                        Config.NAMESPACE_NETWORK_SECURITY, Config.FLAG_SERVICE_ENABLED, false)
+                Config.NAMESPACE_NETWORK_SECURITY, Config.FLAG_SERVICE_ENABLED,
+                /* defaultValue= */ true)
                 && Flags.certificateTransparencyService();
     }
 
     /** Creates a new {@link CertificateTransparencyService} object. */
     public CertificateTransparencyService(Context context) {
-        mFlagsListener = new CertificateTransparencyFlagsListener(context);
+        DataStore dataStore = new DataStore(Config.PREFERENCES_FILE);
+        DownloadHelper downloadHelper = new DownloadHelper(context);
+        SignatureVerifier signatureVerifier = new SignatureVerifier(context);
+        CertificateTransparencyDownloader downloader =
+                new CertificateTransparencyDownloader(
+                        context,
+                        dataStore,
+                        downloadHelper,
+                        signatureVerifier,
+                        new CertificateTransparencyInstaller());
+
+        mFlagsListener =
+                new CertificateTransparencyFlagsListener(dataStore, signatureVerifier, downloader);
+        mCertificateTransparencyJob =
+                new CertificateTransparencyJob(context, dataStore, downloader);
     }
 
     /**
@@ -53,7 +70,11 @@ public class CertificateTransparencyService extends ICertificateTransparencyMana
 
         switch (phase) {
             case SystemService.PHASE_BOOT_COMPLETED:
-                mFlagsListener.initialize();
+                if (Flags.certificateTransparencyJob()) {
+                    mCertificateTransparencyJob.initialize();
+                } else {
+                    mFlagsListener.initialize();
+                }
                 break;
             default:
         }

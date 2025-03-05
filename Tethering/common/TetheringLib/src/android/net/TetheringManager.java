@@ -33,6 +33,7 @@ import android.os.ConditionVariable;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.Process;
 import android.os.RemoteException;
 import android.os.ResultReceiver;
 import android.util.ArrayMap;
@@ -53,6 +54,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 
@@ -61,9 +63,8 @@ import java.util.function.Supplier;
  * <p> The primary responsibilities of this class are to provide the APIs for applications to
  * start tethering, stop tethering, query configuration and query status.
  *
- * @hide
  */
-@SystemApi
+@SuppressLint({"NotCloseable", "UnflaggedApi"})
 public class TetheringManager {
     private static final String TAG = TetheringManager.class.getSimpleName();
     private static final int DEFAULT_TIMEOUT_MS = 60_000;
@@ -93,36 +94,46 @@ public class TetheringManager {
      * {@code TetheringManager.EXTRA_ERRORED_TETHER} to indicate
      * the current state of tethering.  Each include a list of
      * interface names in that state (may be empty).
+     * @hide
      *
      * @deprecated New client should use TetheringEventCallback instead.
      */
     @Deprecated
+    @SystemApi
     public static final String ACTION_TETHER_STATE_CHANGED =
             "android.net.conn.TETHER_STATE_CHANGED";
 
     /**
      * gives a String[] listing all the interfaces configured for
      * tethering and currently available for tethering.
+     * @hide
      */
+    @SystemApi
     public static final String EXTRA_AVAILABLE_TETHER = "availableArray";
 
     /**
      * gives a String[] listing all the interfaces currently in local-only
      * mode (ie, has DHCPv4+IPv6-ULA support and no packet forwarding)
+     * @hide
      */
+    @SystemApi
     public static final String EXTRA_ACTIVE_LOCAL_ONLY = "android.net.extra.ACTIVE_LOCAL_ONLY";
 
     /**
      * gives a String[] listing all the interfaces currently tethered
      * (ie, has DHCPv4 support and packets potentially forwarded/NATed)
+     * @hide
      */
+    @SystemApi
     public static final String EXTRA_ACTIVE_TETHER = "tetherArray";
 
     /**
      * gives a String[] listing all the interfaces we tried to tether and
      * failed.  Use {@link #getLastTetherError} to find the error code
      * for any interfaces listed here.
+     * @hide
      */
+    @SystemApi
     public static final String EXTRA_ERRORED_TETHER = "erroredArray";
 
     /** @hide */
@@ -134,6 +145,7 @@ public class TetheringManager {
             TETHERING_WIFI_P2P,
             TETHERING_NCM,
             TETHERING_ETHERNET,
+            TETHERING_VIRTUAL,
     })
     public @interface TetheringType {
     }
@@ -141,44 +153,57 @@ public class TetheringManager {
     /**
      * Invalid tethering type.
      * @see #startTethering.
+     * @hide
      */
+    @SystemApi
     public static final int TETHERING_INVALID   = -1;
 
     /**
      * Wifi tethering type.
      * @see #startTethering.
      */
+    @SuppressLint("UnflaggedApi")
     public static final int TETHERING_WIFI      = 0;
 
     /**
      * USB tethering type.
      * @see #startTethering.
+     * @hide
      */
+    @SystemApi
     public static final int TETHERING_USB       = 1;
 
     /**
      * Bluetooth tethering type.
      * @see #startTethering.
+     * @hide
      */
+    @SystemApi
     public static final int TETHERING_BLUETOOTH = 2;
 
     /**
      * Wifi P2p tethering type.
      * Wifi P2p tethering is set through events automatically, and don't
      * need to start from #startTethering.
+     * @hide
      */
+    @SystemApi
     public static final int TETHERING_WIFI_P2P = 3;
 
     /**
      * Ncm local tethering type.
      * @see #startTethering(TetheringRequest, Executor, StartTetheringCallback)
+     * @hide
      */
+    @SystemApi
     public static final int TETHERING_NCM = 4;
 
     /**
      * Ethernet tethering type.
      * @see #startTethering(TetheringRequest, Executor, StartTetheringCallback)
+     * @hide
      */
+    @SystemApi
     public static final int TETHERING_ETHERNET = 5;
 
     /**
@@ -206,6 +231,20 @@ public class TetheringManager {
      * @hide
      */
     public static final int MAX_TETHERING_TYPE = TETHERING_VIRTUAL;
+
+    private static String typeToString(@TetheringType int type) {
+        switch (type) {
+            case TETHERING_INVALID: return "TETHERING_INVALID";
+            case TETHERING_WIFI: return "TETHERING_WIFI";
+            case TETHERING_USB: return "TETHERING_USB";
+            case TETHERING_BLUETOOTH: return "TETHERING_BLUETOOTH";
+            case TETHERING_WIFI_P2P: return "TETHERING_WIFI_P2P";
+            case TETHERING_NCM: return "TETHERING_NCM";
+            case TETHERING_ETHERNET: return "TETHERING_ETHERNET";
+            default:
+                return "TETHERING_UNKNOWN(" + type + ")";
+        }
+    }
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -237,30 +276,62 @@ public class TetheringManager {
     @Retention(RetentionPolicy.SOURCE)
     @IntDef(value = {
             TETHER_ERROR_SERVICE_UNAVAIL,
+            TETHER_ERROR_UNSUPPORTED,
             TETHER_ERROR_INTERNAL_ERROR,
             TETHER_ERROR_NO_CHANGE_TETHERING_PERMISSION,
             TETHER_ERROR_UNKNOWN_TYPE,
+            TETHER_ERROR_DUPLICATE_REQUEST,
     })
     public @interface StartTetheringError {
     }
 
+    /** @hide */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(value = {
+            TETHER_ERROR_NO_ERROR,
+            TETHER_ERROR_UNKNOWN_REQUEST,
+    })
+    public @interface StopTetheringError {
+    }
+
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_NO_ERROR = 0;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_UNKNOWN_IFACE = 1;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_SERVICE_UNAVAIL = 2;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_UNSUPPORTED = 3;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_UNAVAIL_IFACE = 4;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_INTERNAL_ERROR = 5;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_TETHER_IFACE_ERROR = 6;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_UNTETHER_IFACE_ERROR = 7;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_ENABLE_FORWARDING_ERROR = 8;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_DISABLE_FORWARDING_ERROR = 9;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_IFACE_CFG_ERROR = 10;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_PROVISIONING_FAILED = 11;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_DHCPSERVER_ERROR = 12;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_ENTITLEMENT_UNKNOWN = 13;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_NO_CHANGE_TETHERING_PERMISSION = 14;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_NO_ACCESS_TETHERING_PERMISSION = 15;
+    @SuppressLint("UnflaggedApi")
     public static final int TETHER_ERROR_UNKNOWN_TYPE = 16;
+    @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
+    public static final int TETHER_ERROR_UNKNOWN_REQUEST = 17;
+    @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
+    public static final int TETHER_ERROR_DUPLICATE_REQUEST = 18;
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -272,11 +343,23 @@ public class TetheringManager {
     public @interface TetherOffloadStatus {
     }
 
-    /** Tethering offload status is stopped. */
+    /**
+     * Tethering offload status is stopped.
+     * @hide
+     */
+    @SystemApi
     public static final int TETHER_HARDWARE_OFFLOAD_STOPPED = 0;
-    /** Tethering offload status is started. */
+    /**
+     * Tethering offload status is started.
+     * @hide
+     */
+    @SystemApi
     public static final int TETHER_HARDWARE_OFFLOAD_STARTED = 1;
-    /** Fail to start tethering offload. */
+    /**
+     * Fail to start tethering offload.
+     * @hide
+     */
+    @SystemApi
     public static final int TETHER_HARDWARE_OFFLOAD_FAILED = 2;
 
     /**
@@ -430,7 +513,7 @@ public class TetheringManager {
     // Used to dispatch legacy ConnectivityManager methods that expect tethering to be able to
     // return results and perform operations synchronously.
     // TODO: remove once there are no callers of these legacy methods.
-    private class RequestDispatcher {
+    private static class RequestDispatcher {
         private final ConditionVariable mWaiting;
         public volatile int mRemoteResult;
 
@@ -446,8 +529,8 @@ public class TetheringManager {
             mWaiting = new ConditionVariable();
         }
 
-        int waitForResult(final RequestHelper request) {
-            getConnector(c -> request.runRequest(c, mListener));
+        int waitForResult(final RequestHelper request, final TetheringManager mgr) {
+            mgr.getConnector(c -> request.runRequest(c, mListener));
             if (!mWaiting.block(DEFAULT_TIMEOUT_MS)) {
                 throw new IllegalStateException("Callback timeout");
             }
@@ -603,7 +686,7 @@ public class TetheringManager {
             } catch (RemoteException e) {
                 throw new IllegalStateException(e);
             }
-        });
+        }, this);
     }
 
     /**
@@ -635,7 +718,7 @@ public class TetheringManager {
             } catch (RemoteException e) {
                 throw new IllegalStateException(e);
             }
-        });
+        }, this);
     }
 
     /**
@@ -663,18 +746,21 @@ public class TetheringManager {
             } catch (RemoteException e) {
                 throw new IllegalStateException(e);
             }
-        });
+        }, this);
     }
 
     /**
      * Indicates that this tethering connection will provide connectivity beyond this device (e.g.,
      * global Internet access).
      */
+    @SuppressLint("UnflaggedApi")
     public static final int CONNECTIVITY_SCOPE_GLOBAL = 1;
 
     /**
      * Indicates that this tethering connection will only provide local connectivity.
+     * @hide
      */
+    @SystemApi
     public static final int CONNECTIVITY_SCOPE_LOCAL = 2;
 
     /**
@@ -688,9 +774,21 @@ public class TetheringManager {
     })
     public @interface ConnectivityScope {}
 
+    private static String connectivityScopeToString(@ConnectivityScope int scope) {
+        switch (scope) {
+            case CONNECTIVITY_SCOPE_GLOBAL:
+                return "CONNECTIVITY_SCOPE_GLOBAL";
+            case CONNECTIVITY_SCOPE_LOCAL:
+                return "CONNECTIVITY_SCOPE_LOCAL";
+            default:
+                return "CONNECTIVITY_SCOPE_UNKNOWN(" + scope + ")";
+        }
+    }
+
     /**
      *  Use with {@link #startTethering} to specify additional parameters when starting tethering.
      */
+    @SuppressLint("UnflaggedApi")
     public static final class TetheringRequest implements Parcelable {
         /** A configuration set for TetheringRequest. */
         private final TetheringRequestParcel mRequestParcel;
@@ -698,7 +796,7 @@ public class TetheringManager {
         /**
          * @hide
          */
-        @FlaggedApi(Flags.FLAG_TETHERING_REQUEST_WITH_SOFT_AP_CONFIG)
+        @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
         public TetheringRequest(@NonNull final TetheringRequestParcel request) {
             mRequestParcel = request;
         }
@@ -707,7 +805,7 @@ public class TetheringManager {
             mRequestParcel = in.readParcelable(TetheringRequestParcel.class.getClassLoader());
         }
 
-        @FlaggedApi(Flags.FLAG_TETHERING_REQUEST_WITH_SOFT_AP_CONFIG)
+        @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
         @NonNull
         public static final Creator<TetheringRequest> CREATOR = new Creator<>() {
             @Override
@@ -721,23 +819,25 @@ public class TetheringManager {
             }
         };
 
-        @FlaggedApi(Flags.FLAG_TETHERING_REQUEST_WITH_SOFT_AP_CONFIG)
+        @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
         @Override
         public int describeContents() {
             return 0;
         }
 
-        @FlaggedApi(Flags.FLAG_TETHERING_REQUEST_WITH_SOFT_AP_CONFIG)
+        @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
         @Override
         public void writeToParcel(@NonNull Parcel dest, int flags) {
             dest.writeParcelable(mRequestParcel, flags);
         }
 
         /** Builder used to create TetheringRequest. */
+        @SuppressLint({"UnflaggedApi", "StaticFinalBuilder"})
         public static class Builder {
             private final TetheringRequestParcel mBuilderParcel;
 
             /** Default constructor of Builder. */
+            @SuppressLint("UnflaggedApi")
             public Builder(@TetheringType final int type) {
                 mBuilderParcel = new TetheringRequestParcel();
                 mBuilderParcel.tetheringType = type;
@@ -746,7 +846,9 @@ public class TetheringManager {
                 mBuilderParcel.exemptFromEntitlementCheck = false;
                 mBuilderParcel.showProvisioningUi = true;
                 mBuilderParcel.connectivityScope = getDefaultConnectivityScope(type);
+                mBuilderParcel.uid = Process.INVALID_UID;
                 mBuilderParcel.softApConfig = null;
+                mBuilderParcel.interfaceName = null;
             }
 
             /**
@@ -757,7 +859,9 @@ public class TetheringManager {
              *
              * @param localIPv4Address The preferred local IPv4 link address to use.
              * @param clientAddress The static client address.
+             * @hide
              */
+            @SystemApi
             @RequiresPermission(android.Manifest.permission.TETHER_PRIVILEGED)
             @NonNull
             public Builder setStaticIpv4Addresses(@NonNull final LinkAddress localIPv4Address,
@@ -773,7 +877,11 @@ public class TetheringManager {
                 return this;
             }
 
-            /** Start tethering without entitlement checks. */
+            /**
+             * Start tethering without entitlement checks.
+             * @hide
+             */
+            @SystemApi
             @RequiresPermission(android.Manifest.permission.TETHER_PRIVILEGED)
             @NonNull
             public Builder setExemptFromEntitlementCheck(boolean exempt) {
@@ -784,7 +892,9 @@ public class TetheringManager {
             /**
              * If an entitlement check is needed, sets whether to show the entitlement UI or to
              * perform a silent entitlement check. By default, the entitlement UI is shown.
+             * @hide
              */
+            @SystemApi
             @RequiresPermission(android.Manifest.permission.TETHER_PRIVILEGED)
             @NonNull
             public Builder setShouldShowEntitlementUi(boolean showUi) {
@@ -793,8 +903,39 @@ public class TetheringManager {
             }
 
             /**
-             * Sets the connectivity scope to be provided by this tethering downstream.
+             * Sets the name of the interface. Currently supported only for
+             * - {@link #TETHERING_VIRTUAL}.
+             * - {@link #TETHERING_WIFI} (for Local-only Hotspot)
+             * - {@link #TETHERING_WIFI_P2P}
+             * @hide
              */
+            @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
+            @RequiresPermission(anyOf = {
+                    android.Manifest.permission.NETWORK_SETTINGS,
+                    android.Manifest.permission.NETWORK_STACK,
+                    NetworkStack.PERMISSION_MAINLINE_NETWORK_STACK,
+            })
+            @NonNull
+            @SystemApi(client = MODULE_LIBRARIES)
+            public Builder setInterfaceName(@Nullable final String interfaceName) {
+                switch (mBuilderParcel.tetheringType) {
+                    case TETHERING_VIRTUAL:
+                    case TETHERING_WIFI_P2P:
+                    case TETHERING_WIFI:
+                        break;
+                    default:
+                        throw new IllegalArgumentException("Interface name cannot be set for"
+                                + " tethering type " + interfaceName);
+                }
+                mBuilderParcel.interfaceName = interfaceName;
+                return this;
+            }
+
+            /**
+             * Sets the connectivity scope to be provided by this tethering downstream.
+             * @hide
+             */
+            @SystemApi
             @RequiresPermission(android.Manifest.permission.TETHER_PRIVILEGED)
             @NonNull
             public Builder setConnectivityScope(@ConnectivityScope int scope) {
@@ -814,11 +955,13 @@ public class TetheringManager {
              * If TETHERING_WIFI is already enabled and a new request is made with a different
              * SoftApConfiguration, the request will be accepted if the device can support an
              * additional tethering Wi-Fi AP interface. Otherwise, the request will be rejected.
+             * </p>
+             * Non-system callers using TETHERING_WIFI must specify a SoftApConfiguration.
              *
              * @param softApConfig SoftApConfiguration to use.
              * @throws IllegalArgumentException if the tethering type isn't TETHERING_WIFI.
              */
-            @FlaggedApi(Flags.FLAG_TETHERING_REQUEST_WITH_SOFT_AP_CONFIG)
+            @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
             @RequiresPermission(android.Manifest.permission.TETHER_PRIVILEGED)
             @NonNull
             public Builder setSoftApConfiguration(@Nullable SoftApConfiguration softApConfig) {
@@ -832,6 +975,7 @@ public class TetheringManager {
 
             /** Build {@link TetheringRequest} with the currently set configuration. */
             @NonNull
+            @SuppressLint("UnflaggedApi")
             public TetheringRequest build() {
                 return new TetheringRequest(mBuilderParcel);
             }
@@ -840,7 +984,9 @@ public class TetheringManager {
         /**
          * Get the local IPv4 address, if one was configured with
          * {@link Builder#setStaticIpv4Addresses}.
+         * @hide
          */
+        @SystemApi
         @Nullable
         public LinkAddress getLocalIpv4Address() {
             return mRequestParcel.localIPv4Address;
@@ -849,32 +995,61 @@ public class TetheringManager {
         /**
          * Get the static IPv4 address of the client, if one was configured with
          * {@link Builder#setStaticIpv4Addresses}.
+         * @hide
          */
+        @SystemApi
         @Nullable
         public LinkAddress getClientStaticIpv4Address() {
             return mRequestParcel.staticClientAddress;
         }
 
-        /** Get tethering type. */
+        /**
+         * Get tethering type.
+         * @hide
+         */
+        @SystemApi
         @TetheringType
         public int getTetheringType() {
             return mRequestParcel.tetheringType;
         }
 
-        /** Get connectivity type */
+        /**
+         * Get connectivity type
+         * @hide
+         */
+        @SystemApi
         @ConnectivityScope
         public int getConnectivityScope() {
             return mRequestParcel.connectivityScope;
         }
 
-        /** Check if exempt from entitlement check. */
+        /**
+         * Check if exempt from entitlement check.
+         * @hide
+         */
+        @SystemApi
         public boolean isExemptFromEntitlementCheck() {
             return mRequestParcel.exemptFromEntitlementCheck;
         }
 
-        /** Check if show entitlement ui.  */
+        /**
+         * Check if show entitlement ui.
+         * @hide
+         */
+        @SystemApi
         public boolean getShouldShowEntitlementUi() {
             return mRequestParcel.showProvisioningUi;
+        }
+
+        /**
+         * Get interface name.
+         * @hide
+         */
+        @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
+        @Nullable
+        @SystemApi(client = MODULE_LIBRARIES)
+        public String getInterfaceName() {
+            return mRequestParcel.interfaceName;
         }
 
         /**
@@ -913,10 +1088,51 @@ public class TetheringManager {
         /**
          * Get the desired SoftApConfiguration of the request, if one was specified.
          */
-        @FlaggedApi(Flags.FLAG_TETHERING_REQUEST_WITH_SOFT_AP_CONFIG)
+        @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
         @Nullable
         public SoftApConfiguration getSoftApConfiguration() {
             return mRequestParcel.softApConfig;
+        }
+
+        /**
+         * Sets the UID of the app that sent this request. This should always be overridden when
+         * receiving TetheringRequest from an external source.
+         * @hide
+         */
+        public void setUid(int uid) {
+            mRequestParcel.uid = uid;
+        }
+
+        /**
+         * Sets the package name of the app that sent this request. This should always be overridden
+         * when receiving a TetheringRequest from an external source.
+         * @hide
+         */
+        public void setPackageName(String packageName) {
+            mRequestParcel.packageName = packageName;
+        }
+
+        /**
+         * Gets the UID of the app that sent this request. This defaults to
+         * {@link Process#INVALID_UID} if unset.
+         * @hide
+         */
+        @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
+        @SystemApi(client = MODULE_LIBRARIES)
+        public int getUid() {
+            return mRequestParcel.uid;
+        }
+
+        /**
+         * Gets the package name of the app that sent this request. This defaults to {@code null} if
+         * unset.
+         * @hide
+         */
+        @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
+        @SystemApi(client = MODULE_LIBRARIES)
+        @Nullable
+        public String getPackageName() {
+            return mRequestParcel.packageName;
         }
 
         /**
@@ -927,17 +1143,46 @@ public class TetheringManager {
             return mRequestParcel;
         }
 
-        /** String of TetheringRequest detail. */
+        /**
+         * String of TetheringRequest detail.
+         * @hide
+         */
+        @SystemApi
         public String toString() {
-            return "TetheringRequest [ type= " + mRequestParcel.tetheringType
-                    + ", localIPv4Address= " + mRequestParcel.localIPv4Address
-                    + ", staticClientAddress= " + mRequestParcel.staticClientAddress
-                    + ", exemptFromEntitlementCheck= " + mRequestParcel.exemptFromEntitlementCheck
-                    + ", showProvisioningUi= " + mRequestParcel.showProvisioningUi
-                    + ", softApConfig= " + mRequestParcel.softApConfig
-                    + " ]";
+            StringJoiner sj = new StringJoiner(", ", "TetheringRequest[ ", " ]");
+            sj.add(typeToString(mRequestParcel.tetheringType));
+            if (mRequestParcel.localIPv4Address != null) {
+                sj.add("localIpv4Address=" + mRequestParcel.localIPv4Address);
+            }
+            if (mRequestParcel.staticClientAddress != null) {
+                sj.add("staticClientAddress=" + mRequestParcel.staticClientAddress);
+            }
+            if (mRequestParcel.exemptFromEntitlementCheck) {
+                sj.add("exemptFromEntitlementCheck");
+            }
+            if (mRequestParcel.showProvisioningUi) {
+                sj.add("showProvisioningUi");
+            }
+            sj.add(connectivityScopeToString(mRequestParcel.connectivityScope));
+            if (mRequestParcel.softApConfig != null) {
+                sj.add("softApConfig=" + mRequestParcel.softApConfig);
+            }
+            if (mRequestParcel.uid != Process.INVALID_UID) {
+                sj.add("uid=" + mRequestParcel.uid);
+            }
+            if (mRequestParcel.packageName != null) {
+                sj.add("packageName=" + mRequestParcel.packageName);
+            }
+            if (mRequestParcel.interfaceName != null) {
+                sj.add("interfaceName=" + mRequestParcel.interfaceName);
+            }
+            return sj.toString();
         }
 
+        /**
+         * @hide
+         */
+        @SystemApi
         @Override
         public boolean equals(Object obj) {
             if (this == obj) return true;
@@ -950,25 +1195,35 @@ public class TetheringManager {
                     && parcel.exemptFromEntitlementCheck == otherParcel.exemptFromEntitlementCheck
                     && parcel.showProvisioningUi == otherParcel.showProvisioningUi
                     && parcel.connectivityScope == otherParcel.connectivityScope
-                    && Objects.equals(parcel.softApConfig, otherParcel.softApConfig);
+                    && Objects.equals(parcel.softApConfig, otherParcel.softApConfig)
+                    && parcel.uid == otherParcel.uid
+                    && Objects.equals(parcel.packageName, otherParcel.packageName)
+                    && Objects.equals(parcel.interfaceName, otherParcel.interfaceName);
         }
 
+        /**
+         * @hide
+         */
+        @SystemApi
         @Override
         public int hashCode() {
             TetheringRequestParcel parcel = getParcel();
             return Objects.hash(parcel.tetheringType, parcel.localIPv4Address,
                     parcel.staticClientAddress, parcel.exemptFromEntitlementCheck,
-                    parcel.showProvisioningUi, parcel.connectivityScope, parcel.softApConfig);
+                    parcel.showProvisioningUi, parcel.connectivityScope, parcel.softApConfig,
+                    parcel.uid, parcel.packageName, parcel.interfaceName);
         }
     }
 
     /**
      * Callback for use with {@link #startTethering} to find out whether tethering succeeded.
      */
+    @SuppressLint("UnflaggedApi")
     public interface StartTetheringCallback {
         /**
          * Called when tethering has been successfully started.
          */
+        @SuppressLint("UnflaggedApi")
         default void onTetheringStarted() {}
 
         /**
@@ -976,15 +1231,31 @@ public class TetheringManager {
          *
          * @param error The error that caused the failure.
          */
+        @SuppressLint("UnflaggedApi")
         default void onTetheringFailed(@StartTetheringError final int error) {}
+    }
+
+    /**
+     * Callback for use with {@link #stopTethering} to find out whether stop tethering succeeded.
+     */
+    @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
+    public interface StopTetheringCallback {
+        /**
+         * Called when tethering has been successfully stopped.
+         */
+        default void onStopTetheringSucceeded() {}
+
+        /**
+         * Called when starting tethering failed.
+         *
+         * @param error The error that caused the failure.
+         */
+        default void onStopTetheringFailed(@StopTetheringError final int error) {}
     }
 
     /**
      * Starts tethering and runs tether provisioning for the given type if needed. If provisioning
      * fails, stopTethering will be called automatically.
-     *
-     * <p>Without {@link android.Manifest.permission.TETHER_PRIVILEGED} permission, the call will
-     * fail if a tethering entitlement check is required.
      *
      * @param request a {@link TetheringRequest} which can specify the preferred configuration.
      * @param executor {@link Executor} to specify the thread upon which the callback of
@@ -992,10 +1263,8 @@ public class TetheringManager {
      * @param callback A callback that will be called to indicate the success status of the
      *                 tethering start request.
      */
-    @RequiresPermission(anyOf = {
-            android.Manifest.permission.TETHER_PRIVILEGED,
-            android.Manifest.permission.WRITE_SETTINGS
-    })
+    @RequiresPermission(value = android.Manifest.permission.TETHER_PRIVILEGED, conditional = true)
+    @SuppressLint("UnflaggedApi")
     public void startTethering(@NonNull final TetheringRequest request,
             @NonNull final Executor executor, @NonNull final StartTetheringCallback callback) {
         final String callerPkg = mContext.getOpPackageName();
@@ -1045,11 +1314,13 @@ public class TetheringManager {
      *
      * <p>Without {@link android.Manifest.permission.TETHER_PRIVILEGED} permission, the call will
      * fail if a tethering entitlement check is required.
+     * @hide
      */
     @RequiresPermission(anyOf = {
             android.Manifest.permission.TETHER_PRIVILEGED,
             android.Manifest.permission.WRITE_SETTINGS
     })
+    @SystemApi
     public void stopTethering(@TetheringType final int type) {
         final String callerPkg = mContext.getOpPackageName();
         Log.i(TAG, "stopTethering caller:" + callerPkg);
@@ -1067,9 +1338,22 @@ public class TetheringManager {
     }
 
     /**
+     * Stops tethering for the given request. Operation will fail with
+     * {@link #TETHER_ERROR_UNKNOWN_REQUEST} if there is no request that matches it.
+     */
+    @RequiresPermission(value = android.Manifest.permission.TETHER_PRIVILEGED, conditional = true)
+    @FlaggedApi(Flags.FLAG_TETHERING_WITH_SOFT_AP_CONFIG)
+    public void stopTethering(@NonNull TetheringRequest request,
+            @NonNull final Executor executor, @NonNull final StopTetheringCallback callback) {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
      * Callback for use with {@link #getLatestTetheringEntitlementResult} to find out whether
      * entitlement succeeded.
+     * @hide
      */
+    @SystemApi
     public interface OnTetheringEntitlementResultListener  {
         /**
          * Called to notify entitlement result.
@@ -1100,7 +1384,9 @@ public class TetheringManager {
      * @param listener an {@link OnTetheringEntitlementResultListener} which will be called to
      *         notify the caller of the result of entitlement check. The listener may be called zero
      *         or one time.
+     * @hide
      */
+    @SystemApi
     @RequiresPermission(anyOf = {
             android.Manifest.permission.TETHER_PRIVILEGED,
             android.Manifest.permission.WRITE_SETTINGS
@@ -1148,6 +1434,7 @@ public class TetheringManager {
      * Callback for use with {@link registerTetheringEventCallback} to find out tethering
      * upstream status.
      */
+    @SuppressLint("UnflaggedApi")
     public interface TetheringEventCallback {
         /**
          * Called when tethering supported status changed.
@@ -1159,7 +1446,9 @@ public class TetheringManager {
          * policy restrictions.
          *
          * @param supported whether any tethering type is supported.
+         * @hide
          */
+        @SystemApi
         default void onTetheringSupported(boolean supported) {}
 
         /**
@@ -1184,7 +1473,9 @@ public class TetheringManager {
          *
          * @param network the {@link Network} of tethering upstream. Null means tethering doesn't
          * have any upstream.
+         * @hide
          */
+        @SystemApi
         default void onUpstreamChanged(@Nullable Network network) {}
 
         /**
@@ -1211,7 +1502,9 @@ public class TetheringManager {
          * <p>This will be called immediately after the callback is registered, and may be called
          * multiple times later upon changes.
          * @param interfaces The list of tetherable interface names.
+         * @hide
          */
+        @SystemApi
         default void onTetherableInterfacesChanged(@NonNull List<String> interfaces) {}
 
         /**
@@ -1221,7 +1514,9 @@ public class TetheringManager {
          * <p>This will be called immediately after the callback is registered, and may be called
          * multiple times later upon changes.
          * @param interfaces The set of TetheringInterface of currently tetherable interface.
+         * @hide
          */
+        @SystemApi
         default void onTetherableInterfacesChanged(@NonNull Set<TetheringInterface> interfaces) {
             // By default, the new callback calls the old callback, so apps
             // implementing the old callback just work.
@@ -1234,7 +1529,9 @@ public class TetheringManager {
          * <p>This will be called immediately after the callback is registered, and may be called
          * multiple times later upon changes.
          * @param interfaces The lit of 0 or more String of currently tethered interface names.
+         * @hide
          */
+        @SystemApi
         default void onTetheredInterfacesChanged(@NonNull List<String> interfaces) {}
 
         /**
@@ -1245,6 +1542,7 @@ public class TetheringManager {
          * @param interfaces The set of 0 or more TetheringInterface of currently tethered
          * interface.
          */
+        @SuppressLint("UnflaggedApi")
         default void onTetheredInterfacesChanged(@NonNull Set<TetheringInterface> interfaces) {
             // By default, the new callback calls the old callback, so apps
             // implementing the old callback just work.
@@ -1257,7 +1555,9 @@ public class TetheringManager {
          * <p>This will be called immediately after the callback is registered, and may be called
          * multiple times later upon changes.
          * @param interfaces The list of 0 or more String of active local-only interface names.
+         * @hide
          */
+        @SystemApi
         default void onLocalOnlyInterfacesChanged(@NonNull List<String> interfaces) {}
 
         /**
@@ -1267,7 +1567,9 @@ public class TetheringManager {
          * multiple times later upon changes.
          * @param interfaces The set of 0 or more TetheringInterface of active local-only
          * interface.
+         * @hide
          */
+        @SystemApi
         default void onLocalOnlyInterfacesChanged(@NonNull Set<TetheringInterface> interfaces) {
             // By default, the new callback calls the old callback, so apps
             // implementing the old callback just work.
@@ -1281,7 +1583,9 @@ public class TetheringManager {
          * on the interface is an error, and may be called multiple times later upon changes.
          * @param ifName Name of the interface.
          * @param error One of {@code TetheringManager#TETHER_ERROR_*}.
+         * @hide
          */
+        @SystemApi
         default void onError(@NonNull String ifName, @TetheringIfaceError int error) {}
 
         /**
@@ -1291,7 +1595,9 @@ public class TetheringManager {
          * on the interface is an error, and may be called multiple times later upon changes.
          * @param iface The interface that experienced the error.
          * @param error One of {@code TetheringManager#TETHER_ERROR_*}.
+         * @hide
          */
+        @SystemApi
         default void onError(@NonNull TetheringInterface iface, @TetheringIfaceError int error) {
             // By default, the new callback calls the old callback, so apps
             // implementing the old callback just work.
@@ -1308,7 +1614,9 @@ public class TetheringManager {
          * clients may still be reported by this callback after disconnection as the system cannot
          * determine if they are still connected.
          * @param clients The new set of tethered clients; the collection is not ordered.
+         * @hide
          */
+        @SystemApi
         default void onClientsChanged(@NonNull Collection<TetheredClient> clients) {}
 
         /**
@@ -1316,7 +1624,9 @@ public class TetheringManager {
          *
          * <p>This will be called immediately after the callback is registered.
          * @param status The offload status.
+         * @hide
          */
+        @SystemApi
         default void onOffloadStatusChanged(@TetherOffloadStatus int status) {}
     }
 
@@ -1410,6 +1720,7 @@ public class TetheringManager {
      * @param callback the callback to be called when tethering has change events.
      */
     @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    @SuppressLint("UnflaggedApi")
     public void registerTetheringEventCallback(@NonNull Executor executor,
             @NonNull TetheringEventCallback callback) {
         Objects.requireNonNull(executor);
@@ -1568,6 +1879,7 @@ public class TetheringManager {
             Manifest.permission.TETHER_PRIVILEGED,
             Manifest.permission.ACCESS_NETWORK_STATE
     })
+    @SuppressLint("UnflaggedApi")
     public void unregisterTetheringEventCallback(@NonNull final TetheringEventCallback callback) {
         Objects.requireNonNull(callback);
 
@@ -1751,17 +2063,16 @@ public class TetheringManager {
             } catch (RemoteException e) {
                 throw new IllegalStateException(e);
             }
-        });
+        }, this);
 
         return ret == TETHER_ERROR_NO_ERROR;
     }
 
     /**
      * Stop all active tethering.
-     *
-     * <p>Without {@link android.Manifest.permission.TETHER_PRIVILEGED} permission, the call will
-     * fail if a tethering entitlement check is required.
+     * @hide
      */
+    @SystemApi
     @RequiresPermission(anyOf = {
             android.Manifest.permission.TETHER_PRIVILEGED,
             android.Manifest.permission.WRITE_SETTINGS
@@ -1800,6 +2111,6 @@ public class TetheringManager {
             } catch (RemoteException e) {
                 throw new IllegalStateException(e);
             }
-        });
+        }, this);
     }
 }

@@ -26,6 +26,11 @@ import com.android.server.ConnectivityService;
  */
 public final class ConnectivityFlags {
     /**
+     * Boot namespace for this module. Values from this should only be read at boot.
+     */
+    public static final String NAMESPACE_TETHERING_BOOT = "tethering_boot";
+
+    /**
      * Minimum module version at which to avoid rematching all requests when a network request is
      * registered, and rematch only the registered requests instead.
      */
@@ -43,6 +48,11 @@ public final class ConnectivityFlags {
             "ingress_to_vpn_address_filtering";
 
     public static final String BACKGROUND_FIREWALL_CHAIN = "background_firewall_chain";
+
+    public static final String CELLULAR_DATA_INACTIVITY_TIMEOUT =
+            "cellular_data_inactivity_timeout";
+
+    public static final String WIFI_DATA_INACTIVITY_TIMEOUT = "wifi_data_inactivity_timeout";
 
     public static final String DELAY_DESTROY_SOCKETS = "delay_destroy_sockets";
 

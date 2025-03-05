@@ -97,6 +97,7 @@ static Status initPrograms(const char* cg2_path) {
         ALOGE("Failed to open the cgroup directory: %s", strerror(err));
         return statusFromErrno(err, "Open the cgroup directory failed");
     }
+
     RETURN_IF_NOT_OK(checkProgramAccessible(XT_BPF_ALLOWLIST_PROG_PATH));
     RETURN_IF_NOT_OK(checkProgramAccessible(XT_BPF_DENYLIST_PROG_PATH));
     RETURN_IF_NOT_OK(checkProgramAccessible(XT_BPF_EGRESS_PROG_PATH));
@@ -120,18 +121,22 @@ static Status initPrograms(const char* cg2_path) {
     }
 
     if (modules::sdklevel::IsAtLeastV()) {
-        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT4_PROG_PATH,
-                                    cg_fd, BPF_CGROUP_INET4_CONNECT));
-        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT6_PROG_PATH,
-                                    cg_fd, BPF_CGROUP_INET6_CONNECT));
-        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_RECVMSG_PROG_PATH,
-                                    cg_fd, BPF_CGROUP_UDP4_RECVMSG));
-        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_RECVMSG_PROG_PATH,
-                                    cg_fd, BPF_CGROUP_UDP6_RECVMSG));
-        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_SENDMSG_PROG_PATH,
-                                    cg_fd, BPF_CGROUP_UDP4_SENDMSG));
-        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_SENDMSG_PROG_PATH,
-                                    cg_fd, BPF_CGROUP_UDP6_SENDMSG));
+        // V requires 4.19+, so technically this 2nd 'if' is not required, but it
+        // doesn't hurt us to try to support AOSP forks that try to support older kernels.
+        if (bpf::isAtLeastKernelVersion(4, 19, 0)) {
+            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT4_PROG_PATH,
+                                        cg_fd, BPF_CGROUP_INET4_CONNECT));
+            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT6_PROG_PATH,
+                                        cg_fd, BPF_CGROUP_INET6_CONNECT));
+            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_RECVMSG_PROG_PATH,
+                                        cg_fd, BPF_CGROUP_UDP4_RECVMSG));
+            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_RECVMSG_PROG_PATH,
+                                        cg_fd, BPF_CGROUP_UDP6_RECVMSG));
+            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_SENDMSG_PROG_PATH,
+                                        cg_fd, BPF_CGROUP_UDP4_SENDMSG));
+            RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_SENDMSG_PROG_PATH,
+                                        cg_fd, BPF_CGROUP_UDP6_SENDMSG));
+        }
 
         if (bpf::isAtLeastKernelVersion(5, 4, 0)) {
             RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_GETSOCKOPT_PROG_PATH,
@@ -161,12 +166,16 @@ static Status initPrograms(const char* cg2_path) {
     }
 
     if (modules::sdklevel::IsAtLeastV()) {
-        if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET4_CONNECT) <= 0) abort();
-        if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET6_CONNECT) <= 0) abort();
-        if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP4_RECVMSG) <= 0) abort();
-        if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP6_RECVMSG) <= 0) abort();
-        if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP4_SENDMSG) <= 0) abort();
-        if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP6_SENDMSG) <= 0) abort();
+        // V requires 4.19+, so technically this 2nd 'if' is not required, but it
+        // doesn't hurt us to try to support AOSP forks that try to support older kernels.
+        if (bpf::isAtLeastKernelVersion(4, 19, 0)) {
+            if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET4_CONNECT) <= 0) abort();
+            if (bpf::queryProgram(cg_fd, BPF_CGROUP_INET6_CONNECT) <= 0) abort();
+            if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP4_RECVMSG) <= 0) abort();
+            if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP6_RECVMSG) <= 0) abort();
+            if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP4_SENDMSG) <= 0) abort();
+            if (bpf::queryProgram(cg_fd, BPF_CGROUP_UDP6_SENDMSG) <= 0) abort();
+        }
 
         if (bpf::isAtLeastKernelVersion(5, 4, 0)) {
             if (bpf::queryProgram(cg_fd, BPF_CGROUP_GETSOCKOPT) <= 0) abort();
@@ -201,7 +210,7 @@ static inline void waitForNetProgsLoaded() {
     }
 }
 
-Status BpfHandler::init(const char* cg2_path) {
+static inline void waitForBpf() {
     // Note: netd *can* be restarted, so this might get called a second time after boot is complete
     // at which point we don't need to (and shouldn't) wait for (more importantly start) loading bpf
 
@@ -229,6 +238,21 @@ Status BpfHandler::init(const char* cg2_path) {
     }
 
     ALOGI("BPF programs are loaded");
+}
+
+Status BpfHandler::init(const char* cg2_path) {
+    // This wait is effectively a no-op on U QPR3+ devices (as netd starts
+    // *after* the synchronous 'exec_start bpfloader' which calls NetBpfLoad)
+    // but checking for U QPR3 is hard.
+    //
+    // Waiting should not be required on U QPR3+ devices,
+    // ...
+    //
+    // ...unless someone changed 'exec_start bpfloader' to 'start bpfloader'
+    // in the rc file.
+    //
+    // TODO: should be: if (!modules::sdklevel::IsAtLeastW())
+    if (android_get_device_api_level() <= __ANDROID_API_V__) waitForBpf();
 
     RETURN_IF_NOT_OK(initPrograms(cg2_path));
     RETURN_IF_NOT_OK(initMaps());

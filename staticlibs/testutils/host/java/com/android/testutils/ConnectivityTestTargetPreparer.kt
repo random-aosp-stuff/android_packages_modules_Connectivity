@@ -18,16 +18,20 @@ package com.android.testutils
 
 import com.android.ddmlib.testrunner.TestResult
 import com.android.tradefed.config.Option
+import com.android.tradefed.invoker.ExecutionFiles.FilesKey
 import com.android.tradefed.invoker.TestInformation
+import com.android.tradefed.log.LogUtil.CLog
 import com.android.tradefed.result.CollectingTestListener
 import com.android.tradefed.result.ddmlib.DefaultRemoteAndroidTestRunner
 import com.android.tradefed.targetprep.BaseTargetPreparer
 import com.android.tradefed.targetprep.TargetSetupError
 import com.android.tradefed.targetprep.suite.SuiteApkInstaller
+import java.io.File
 
 private const val CONNECTIVITY_CHECKER_APK = "ConnectivityTestPreparer.apk"
 private const val CONNECTIVITY_PKG_NAME = "com.android.testutils.connectivitypreparer"
 private const val CONNECTIVITY_CHECK_CLASS = "$CONNECTIVITY_PKG_NAME.ConnectivityCheckTest"
+private const val CARRIER_CONFIG_SETUP_CLASS = "$CONNECTIVITY_PKG_NAME.CarrierConfigSetupTest"
 
 // As per the <instrumentation> defined in the checker manifest
 private const val CONNECTIVITY_CHECK_RUNNER_NAME = "androidx.test.runner.AndroidJUnitRunner"
@@ -47,7 +51,41 @@ private val UPDATER_PKGS = arrayOf("com.google.android.gms", "com.android.vendin
  * --test-arg com.android.testutils.ConnectivityTestTargetPreparer:ignore-wifi-check:true".
  */
 open class ConnectivityTestTargetPreparer : BaseTargetPreparer() {
-    private val installer = SuiteApkInstaller()
+    private val installer = ApkInstaller()
+
+    private class ApkInstaller : SuiteApkInstaller() {
+        override fun getLocalPathForFilename(
+            testInfo: TestInformation,
+            apkFileName: String
+        ): File {
+            if (apkFileName == CONNECTIVITY_CHECKER_APK) {
+                // For the connectivity checker APK, explicitly look for it in the directory of the
+                // host-side preparer.
+                // This preparer is part of the net-tests-utils-host-common library, which includes
+                // the checker APK via device_common_data in its build rule. Both need to be at the
+                // same version so that the preparer calls the right test methods in the checker
+                // APK.
+                // The default strategy for finding test files is to do a recursive search in test
+                // directories, which may find wrong files in wrong directories. In particular,
+                // if some MTS test includes the checker APK, and that test is linked to a module
+                // that boards the train at a version different from this target preparer, there
+                // could be a version difference between the APK and the host-side preparer.
+                // Explicitly looking for the APK in the host-side preparer directory ensures that
+                // it uses the version that was packaged together with the host-side preparer.
+                val testsDir = testInfo.executionFiles().get(FilesKey.TESTS_DIRECTORY)
+                val f = File(testsDir, "net-tests-utils-host-common/$CONNECTIVITY_CHECKER_APK")
+                if (f.isFile) {
+                    return f
+                }
+                // When running locally via atest, device_common_data does cause the APK to be put
+                // into the test temp directory, so recursive search is still used to find it in the
+                // directory of the test module that is being run. This is fine because atest runs
+                // are on local trees that do not have versioning problems.
+                CLog.i("APK not found at $f, falling back to recursive search")
+            }
+            return super.getLocalPathForFilename(testInfo, apkFileName)
+        }
+    }
 
     @Option(
         name = IGNORE_WIFI_CHECK,
@@ -84,27 +122,28 @@ open class ConnectivityTestTargetPreparer : BaseTargetPreparer() {
         installer.setShouldGrantPermission(true)
         installer.setUp(testInfo)
 
-        val testMethods = mutableListOf<String>()
+        val testMethods = mutableListOf<Pair<String, String>>()
         if (!ignoreWifiCheck) {
-            testMethods.add("testCheckWifiSetup")
+            testMethods.add(CONNECTIVITY_CHECK_CLASS to "testCheckWifiSetup")
         }
         if (!ignoreMobileDataCheck) {
-            testMethods.add("testCheckTelephonySetup")
+            testMethods.add(CARRIER_CONFIG_SETUP_CLASS to "testSetCarrierConfig")
+            testMethods.add(CONNECTIVITY_CHECK_CLASS to "testCheckTelephonySetup")
         }
 
         testMethods.forEach {
-            runTestMethod(testInfo, it)
+            runTestMethod(testInfo, it.first, it.second)
         }
     }
 
-    private fun runTestMethod(testInfo: TestInformation, method: String) {
+    private fun runTestMethod(testInfo: TestInformation, clazz: String, method: String) {
         val runner = DefaultRemoteAndroidTestRunner(
             CONNECTIVITY_PKG_NAME,
             CONNECTIVITY_CHECK_RUNNER_NAME,
             testInfo.device.iDevice
         )
         runner.runOptions = "--no-hidden-api-checks"
-        runner.setMethodName(CONNECTIVITY_CHECK_CLASS, method)
+        runner.setMethodName(clazz, method)
 
         val receiver = CollectingTestListener()
         if (!testInfo.device.runInstrumentationTests(runner, receiver)) {
@@ -177,7 +216,7 @@ open class ConnectivityTestTargetPreparer : BaseTargetPreparer() {
                 .contains(":deny")
         }
 
-    private fun refreshTime(testInfo: TestInformation,) {
+    private fun refreshTime(testInfo: TestInformation) {
         // Forces a synchronous time refresh using the network. Time is fetched synchronously but
         // this does not guarantee that system time is updated when it returns.
         // This avoids flakes where the system clock rolls back, for example when using test
@@ -187,6 +226,9 @@ open class ConnectivityTestTargetPreparer : BaseTargetPreparer() {
 
     override fun tearDown(testInfo: TestInformation, e: Throwable?) {
         if (isTearDownDisabled) return
+        if (!ignoreMobileDataCheck) {
+            runTestMethod(testInfo, CARRIER_CONFIG_SETUP_CLASS, "testClearCarrierConfig")
+        }
         installer.tearDown(testInfo, e)
         setUpdaterNetworkingEnabled(
             testInfo,

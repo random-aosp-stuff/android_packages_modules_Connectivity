@@ -16,9 +16,9 @@
 
 package com.android.server.connectivity.mdns;
 
+import static com.android.net.module.util.HandlerUtils.ensureRunningOnHandlerThread;
 import static com.android.server.connectivity.mdns.MdnsConstants.IPV4_SOCKET_ADDR;
 import static com.android.server.connectivity.mdns.MdnsConstants.IPV6_SOCKET_ADDR;
-import static com.android.server.connectivity.mdns.util.MdnsUtils.ensureRunningOnHandlerThread;
 
 import android.annotation.NonNull;
 import android.annotation.RequiresApi;
@@ -245,7 +245,7 @@ public class MdnsReplySender {
                 return;
             }
 
-            if (mEnableDebugLog) mSharedLog.v("Sending " + replyInfo);
+            mSharedLog.log("Sending " + replyInfo);
 
             final int flags = 0x8400; // Response, authoritative (rfc6762 18.4)
             final MdnsPacket packet = new MdnsPacket(flags,

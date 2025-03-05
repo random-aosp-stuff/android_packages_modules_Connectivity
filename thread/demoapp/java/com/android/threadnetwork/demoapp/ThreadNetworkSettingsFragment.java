@@ -28,6 +28,7 @@ import android.net.RouteInfo;
 import android.net.thread.ActiveOperationalDataset;
 import android.net.thread.OperationalDatasetTimestamp;
 import android.net.thread.PendingOperationalDataset;
+import android.net.thread.ThreadConfiguration;
 import android.net.thread.ThreadNetworkController;
 import android.net.thread.ThreadNetworkException;
 import android.net.thread.ThreadNetworkManager;
@@ -45,8 +46,13 @@ import android.widget.TextView;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
 
+import com.google.android.material.switchmaterial.SwitchMaterial;
+
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.Executor;
 
 public final class ThreadNetworkSettingsFragment extends Fragment {
@@ -59,11 +65,18 @@ public final class ThreadNetworkSettingsFragment extends Fragment {
     private TextView mTextState;
     private TextView mTextNetworkInfo;
     private TextView mMigrateNetworkState;
+    private TextView mEphemeralKeyStateText;
+    private SwitchMaterial mNat64Switch;
     private Executor mMainExecutor;
 
     private int mDeviceRole;
     private long mPartitionId;
     private ActiveOperationalDataset mActiveDataset;
+    private int mEphemeralKeyState;
+    private String mEphemeralKey;
+    private Instant mEphemeralKeyExpiry;
+    private Timer mEphemeralKeyLifetimeTimer;
+    private ThreadConfiguration mThreadConfiguration;
 
     private static final byte[] DEFAULT_ACTIVE_DATASET_TLVS =
             base16().lowerCase()
@@ -87,6 +100,23 @@ public final class ThreadNetworkSettingsFragment extends Fragment {
             default:
                 return "Unknown";
         }
+    }
+
+    private static String ephemeralKeyStateToString(int ephemeralKeyState) {
+        switch (ephemeralKeyState) {
+            case ThreadNetworkController.EPHEMERAL_KEY_DISABLED:
+                return "Disabled";
+            case ThreadNetworkController.EPHEMERAL_KEY_ENABLED:
+                return "Enabled";
+            case ThreadNetworkController.EPHEMERAL_KEY_IN_USE:
+                return "Connected";
+            default:
+                return "Unknown";
+        }
+    }
+
+    private static String booleanToEnabledOrDisabled(boolean enabled) {
+        return enabled ? "Enabled" : "Disabled";
     }
 
     @Override
@@ -144,6 +174,15 @@ public final class ThreadNetworkSettingsFragment extends Fragment {
                             ThreadNetworkSettingsFragment.this.mPartitionId = mPartitionId;
                             updateState();
                         }
+
+                        @Override
+                        public void onEphemeralKeyStateChanged(
+                                int state, String ephemeralKey, Instant expiry) {
+                            ThreadNetworkSettingsFragment.this.mEphemeralKeyState = state;
+                            ThreadNetworkSettingsFragment.this.mEphemeralKey = ephemeralKey;
+                            ThreadNetworkSettingsFragment.this.mEphemeralKeyExpiry = expiry;
+                            updateState();
+                        }
                     });
             mThreadController.registerOperationalDatasetCallback(
                     mMainExecutor,
@@ -151,10 +190,16 @@ public final class ThreadNetworkSettingsFragment extends Fragment {
                         this.mActiveDataset = newActiveDataset;
                         updateState();
                     });
+            mThreadController.registerConfigurationCallback(
+                    mMainExecutor, this::updateConfiguration);
         }
 
         mTextState = (TextView) view.findViewById(R.id.text_state);
         mTextNetworkInfo = (TextView) view.findViewById(R.id.text_network_info);
+        mEphemeralKeyStateText = (TextView) view.findViewById(R.id.text_ephemeral_key_state);
+        mNat64Switch = (SwitchMaterial) view.findViewById(R.id.switch_nat64);
+        mNat64Switch.setOnCheckedChangeListener(
+                (buttonView, isChecked) -> doSetNat64Enabled(isChecked));
 
         if (mThreadController == null) {
             mTextState.setText("Thread not supported!");
@@ -167,6 +212,11 @@ public final class ThreadNetworkSettingsFragment extends Fragment {
         mMigrateNetworkState = view.findViewById(R.id.text_migrate_network_state);
         ((Button) view.findViewById(R.id.button_migrate_network))
                 .setOnClickListener(v -> doMigration());
+
+        ((Button) view.findViewById(R.id.button_activate_ephemeral_key_mode))
+                .setOnClickListener(v -> doActivateEphemeralKeyMode());
+        ((Button) view.findViewById(R.id.button_deactivate_ephemeral_key_mode))
+                .setOnClickListener(v -> doDeactivateEphemeralKeyMode());
 
         updateState();
     }
@@ -234,12 +284,74 @@ public final class ThreadNetworkSettingsFragment extends Fragment {
                 });
     }
 
+    private void doActivateEphemeralKeyMode() {
+        mThreadController.activateEphemeralKeyMode(
+                Duration.ofMinutes(2),
+                mMainExecutor,
+                new OutcomeReceiver<>() {
+                    @Override
+                    public void onError(ThreadNetworkException error) {
+                        Log.e(TAG, "Failed to activate ephemeral key", error);
+                    }
+
+                    @Override
+                    public void onResult(Void v) {
+                        Log.i(TAG, "Successfully activated ephemeral key mode");
+                    }
+                });
+    }
+
+    private void doDeactivateEphemeralKeyMode() {
+        mThreadController.deactivateEphemeralKeyMode(
+                mMainExecutor,
+                new OutcomeReceiver<>() {
+                    @Override
+                    public void onError(ThreadNetworkException error) {
+                        Log.e(TAG, "Failed to deactivate ephemeral key", error);
+                    }
+
+                    @Override
+                    public void onResult(Void v) {
+                        Log.i(TAG, "Successfully deactivated ephemeral key mode");
+                    }
+                });
+    }
+
+    private void doSetNat64Enabled(boolean enabled) {
+        if (mThreadConfiguration == null) {
+            Log.e(TAG, "Thread configuration is not available");
+            return;
+        }
+        final ThreadConfiguration config =
+                new ThreadConfiguration.Builder(mThreadConfiguration)
+                        .setNat64Enabled(enabled)
+                        .build();
+        mThreadController.setConfiguration(
+                config,
+                mMainExecutor,
+                new OutcomeReceiver<>() {
+                    @Override
+                    public void onError(ThreadNetworkException error) {
+                        Log.e(
+                                TAG,
+                                "Failed to set NAT64 " + booleanToEnabledOrDisabled(enabled),
+                                error);
+                    }
+
+                    @Override
+                    public void onResult(Void v) {
+                        Log.i(TAG, "Successfully set NAT64 " + booleanToEnabledOrDisabled(enabled));
+                    }
+                });
+    }
+
     private void updateState() {
         Log.i(
                 TAG,
                 String.format(
-                        "Updating Thread states (mDeviceRole: %s)",
-                        deviceRoleToString(mDeviceRole)));
+                        "Updating Thread states (mDeviceRole: %s, mEphemeralKeyState: %s)",
+                        deviceRoleToString(mDeviceRole),
+                        ephemeralKeyStateToString(mEphemeralKeyState)));
 
         String state =
                 String.format(
@@ -254,6 +366,30 @@ public final class ThreadNetworkSettingsFragment extends Fragment {
                                 ? base16().encode(mActiveDataset.getExtendedPanId())
                                 : null);
         mTextState.setText(state);
+
+        updateEphemeralKeyStatus();
+    }
+
+    private void updateEphemeralKeyStatus() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(ephemeralKeyStateToString(mEphemeralKeyState));
+        if (mEphemeralKeyState != ThreadNetworkController.EPHEMERAL_KEY_DISABLED) {
+            sb.append("\nPasscode: ");
+            sb.append(mEphemeralKey);
+            sb.append("\nRemaining lifetime: ");
+            sb.append(Instant.now().until(mEphemeralKeyExpiry, ChronoUnit.SECONDS));
+            sb.append(" seconds");
+            mEphemeralKeyLifetimeTimer = new Timer();
+            mEphemeralKeyLifetimeTimer.schedule(
+                    new TimerTask() {
+                        @Override
+                        public void run() {
+                            mMainExecutor.execute(() -> updateEphemeralKeyStatus());
+                        }
+                    },
+                    1000L /* delay in millis */);
+        }
+        mEphemeralKeyStateText.setText(sb.toString());
     }
 
     private void updateNetworkInfo(LinkProperties linProperties) {
@@ -273,5 +409,12 @@ public final class ThreadNetworkSettingsFragment extends Fragment {
             sb.append(route + "\n");
         }
         mTextNetworkInfo.setText(sb.toString());
+    }
+
+    private void updateConfiguration(ThreadConfiguration config) {
+        Log.i(TAG, "Updating configuration: " + config);
+
+        mThreadConfiguration = config;
+        mNat64Switch.setChecked(config.isNat64Enabled());
     }
 }

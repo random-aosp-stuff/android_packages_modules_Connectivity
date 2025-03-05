@@ -21,9 +21,11 @@ import android.app.usage.NetworkStatsManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothPan;
 import android.content.Context;
+import android.net.ConnectivityManager;
 import android.net.INetd;
 import android.net.connectivity.ConnectivityInternalApiUtil;
 import android.net.ip.IpServer;
+import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -135,7 +137,10 @@ public abstract class TetheringDependencies {
     public RoutingCoordinatorManager getRoutingCoordinator(Context context, SharedLog log) {
         IBinder binder;
         if (!SdkLevel.isAtLeastS()) {
-            binder = new RoutingCoordinatorService(getINetd(context, log));
+            final ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
+            binder =
+                    new RoutingCoordinatorService(
+                            getINetd(context, log), cm::getAllNetworks, context);
         } else {
             binder = ConnectivityInternalApiUtil.getRoutingCoordinator(context);
         }
@@ -174,14 +179,6 @@ public abstract class TetheringDependencies {
     }
 
     /**
-     * Make PrivateAddressCoordinator to be used by Tethering.
-     */
-    public PrivateAddressCoordinator makePrivateAddressCoordinator(Context ctx,
-            TetheringConfiguration cfg) {
-        return new PrivateAddressCoordinator(ctx, cfg);
-    }
-
-    /**
      * Make BluetoothPanShim object to enable/disable bluetooth tethering.
      *
      * TODO: use BluetoothPan directly when mainline module is built with API 32.
@@ -203,5 +200,12 @@ public abstract class TetheringDependencies {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public WearableConnectionManager makeWearableConnectionManager(Context ctx) {
         return new WearableConnectionManager(ctx);
+    }
+
+    /**
+     * Wrapper to get the binder calling uid for unit testing.
+     */
+    public int getBinderCallingUid() {
+        return Binder.getCallingUid();
     }
 }

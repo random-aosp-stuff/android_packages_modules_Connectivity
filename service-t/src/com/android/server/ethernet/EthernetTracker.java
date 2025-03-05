@@ -49,6 +49,7 @@ import android.util.Log;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.modules.utils.build.SdkLevel;
+import com.android.net.module.util.HandlerUtils;
 import com.android.net.module.util.NetdUtils;
 import com.android.net.module.util.PermissionUtils;
 import com.android.net.module.util.SharedLog;
@@ -138,8 +139,8 @@ public class EthernetTracker {
     private int mTetheringInterfaceMode = INTERFACE_MODE_CLIENT;
     // Tracks whether clients were notified that the tethered interface is available
     private boolean mTetheredInterfaceWasAvailable = false;
-
-    private int mEthernetState = ETHERNET_STATE_ENABLED;
+    // Tracks the current state of ethernet as configured by EthernetManager#setEthernetEnabled.
+    private boolean mIsEthernetEnabled = true;
 
     private class TetheredInterfaceRequestList extends
             RemoteCallbackList<ITetheredInterfaceCallback> {
@@ -214,9 +215,6 @@ public class EthernetTracker {
         // Note: processNetlinkMessage is called on the handler thread.
         @Override
         protected void processNetlinkMessage(NetlinkMessage nlMsg, long whenMs) {
-            // ignore all updates when ethernet is disabled.
-            if (mEthernetState == ETHERNET_STATE_DISABLED) return;
-
             if (nlMsg instanceof RtNetlinkLinkMessage) {
                 processRtNetlinkLinkMessage((RtNetlinkLinkMessage) nlMsg);
             } else {
@@ -302,11 +300,7 @@ public class EthernetTracker {
     }
 
     private void ensureRunningOnEthernetServiceThread() {
-        if (mHandler.getLooper().getThread() != Thread.currentThread()) {
-            throw new IllegalStateException(
-                    "Not running on EthernetService thread: "
-                            + Thread.currentThread().getName());
-        }
+        HandlerUtils.ensureRunningOnHandlerThread(mHandler);
     }
 
     /**
@@ -450,7 +444,7 @@ public class EthernetTracker {
                 unicastInterfaceStateChange(listener, mTetheringInterface);
             }
 
-            unicastEthernetStateChange(listener, mEthernetState);
+            unicastEthernetStateChange(listener, mIsEthernetEnabled);
         });
     }
 
@@ -599,10 +593,13 @@ public class EthernetTracker {
             // Read the flags before attempting to bring up the interface. If the interface is
             // already running an UP event is created after adding the interface.
             config = NetdUtils.getInterfaceConfigParcel(mNetd, iface);
-            if (NetdUtils.hasFlag(config, INetd.IF_STATE_DOWN)) {
+            // Only bring the interface up when ethernet is enabled.
+            if (mIsEthernetEnabled) {
                 // As a side-effect, NetdUtils#setInterfaceUp() also clears the interface's IPv4
                 // address and readds it which *could* lead to unexpected behavior in the future.
                 NetdUtils.setInterfaceUp(mNetd, iface);
+            } else {
+                NetdUtils.setInterfaceDown(mNetd, iface);
             }
         } catch (IllegalStateException e) {
             // Either the system is crashing or the interface has disappeared. Just ignore the
@@ -649,6 +646,10 @@ public class EthernetTracker {
     }
 
     private void setInterfaceAdministrativeState(String iface, boolean up, EthernetCallback cb) {
+        if (!mIsEthernetEnabled) {
+            cb.onError("Cannot enable/disable interface when ethernet is disabled");
+            return;
+        }
         if (getInterfaceState(iface) == EthernetManager.STATE_ABSENT) {
             cb.onError("Failed to enable/disable absent interface: " + iface);
             return;
@@ -963,43 +964,51 @@ public class EthernetTracker {
     @VisibleForTesting(visibility = PACKAGE)
     protected void setEthernetEnabled(boolean enabled) {
         mHandler.post(() -> {
-            int newState = enabled ? ETHERNET_STATE_ENABLED : ETHERNET_STATE_DISABLED;
-            if (mEthernetState == newState) return;
+            if (mIsEthernetEnabled == enabled) return;
 
-            mEthernetState = newState;
+            mIsEthernetEnabled = enabled;
 
-            if (enabled) {
-                trackAvailableInterfaces();
-            } else {
-                // TODO: maybe also disable server mode interface as well.
-                untrackFactoryInterfaces();
+            // Interface in server mode should also be included.
+            ArrayList<String> interfaces =
+                    new ArrayList<>(
+                    List.of(mFactory.getAvailableInterfaces(/* includeRestricted */ true)));
+
+            if (mTetheringInterfaceMode == INTERFACE_MODE_SERVER) {
+                interfaces.add(mTetheringInterface);
             }
-            broadcastEthernetStateChange(mEthernetState);
+
+            for (String iface : interfaces) {
+                if (enabled) {
+                    NetdUtils.setInterfaceUp(mNetd, iface);
+                } else {
+                    NetdUtils.setInterfaceDown(mNetd, iface);
+                }
+            }
+            broadcastEthernetStateChange(mIsEthernetEnabled);
         });
     }
 
-    private void untrackFactoryInterfaces() {
-        for (String iface : mFactory.getAvailableInterfaces(true /* includeRestricted */)) {
-            stopTrackingInterface(iface);
-        }
+    private int isEthernetEnabledAsInt(boolean state) {
+        return state ? ETHERNET_STATE_ENABLED : ETHERNET_STATE_DISABLED;
     }
 
     private void unicastEthernetStateChange(@NonNull IEthernetServiceListener listener,
-            int state) {
+            boolean enabled) {
         ensureRunningOnEthernetServiceThread();
         try {
-            listener.onEthernetStateChanged(state);
+            listener.onEthernetStateChanged(isEthernetEnabledAsInt(enabled));
         } catch (RemoteException e) {
             // Do nothing here.
         }
     }
 
-    private void broadcastEthernetStateChange(int state) {
+    private void broadcastEthernetStateChange(boolean enabled) {
         ensureRunningOnEthernetServiceThread();
         final int n = mListeners.beginBroadcast();
         for (int i = 0; i < n; i++) {
             try {
-                mListeners.getBroadcastItem(i).onEthernetStateChanged(state);
+                mListeners.getBroadcastItem(i)
+                            .onEthernetStateChanged(isEthernetEnabledAsInt(enabled));
             } catch (RemoteException e) {
                 // Do nothing here.
             }
@@ -1011,7 +1020,7 @@ public class EthernetTracker {
         postAndWaitForRunnable(() -> {
             pw.println(getClass().getSimpleName());
             pw.println("Ethernet State: "
-                    + (mEthernetState == ETHERNET_STATE_ENABLED ? "enabled" : "disabled"));
+                    + (mIsEthernetEnabled ? "enabled" : "disabled"));
             pw.println("Ethernet interface name filter: " + mIfaceMatch);
             pw.println("Interface used for tethering: " + mTetheringInterface);
             pw.println("Tethering interface mode: " + mTetheringInterfaceMode);

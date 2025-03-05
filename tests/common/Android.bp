@@ -61,7 +61,7 @@ java_library {
 // Combine Connectivity, NetworkStack and Tethering jarjar rules for coverage target.
 // The jarjar files are simply concatenated in the order specified in srcs.
 // jarjar stops at the first matching rule, so order of concatenation affects the output.
-genrule {
+java_genrule {
     name: "ConnectivityCoverageJarJarRules",
     defaults: ["jarjar-rules-combine-defaults"],
     srcs: [
@@ -78,7 +78,7 @@ android_library {
     name: "ConnectivityCoverageTestsLib",
     min_sdk_version: "30",
     static_libs: [
-        "FrameworksNetTestsLib",
+        "ConnectivityUnitTestsLib",
         "NetdStaticLibTestsLib",
         "NetworkStaticLibTestsLib",
         "NetworkStackTestsLib",
@@ -147,6 +147,7 @@ java_defaults {
         // meaning @hide APIs in framework-connectivity are resolved before @SystemApi
         // stubs in framework
         "framework-connectivity.impl",
+        "framework-connectivity-b.impl",
         "framework-connectivity-t.impl",
         "framework-tethering.impl",
         "framework",

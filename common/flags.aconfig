@@ -41,7 +41,7 @@ flag {
 }
 
 flag {
-  name: "tethering_request_with_soft_ap_config"
+  name: "tethering_with_soft_ap_config"
   is_exported: true
   namespace: "android_core_networking"
   description: "The flag controls the access for the parcelable TetheringRequest with getSoftApConfiguration/setSoftApConfiguration API"

@@ -63,6 +63,10 @@
 #define BPF_LOAD_SKB_PROTOCOL \
 	BPF_STMT(BPF_LD | BPF_H | BPF_ABS, (__u32)SKF_AD_OFF + SKF_AD_PROTOCOL)
 
+// loads skb->pkt_type (0..7: see uapi/linux/if_packet.h PACKET_* constants)
+#define BPF_LOAD_SKB_PKTTYPE \
+	BPF_STMT(BPF_LD | BPF_B | BPF_ABS, (__u32)SKF_AD_OFF + SKF_AD_PKTTYPE)
+
 // 8-bit load relative to start of link layer (mac/ethernet) header.
 #define BPF_LOAD_MAC_RELATIVE_U8(ofs) \
 	BPF_STMT(BPF_LD | BPF_B | BPF_ABS, (__u32)SKF_LL_OFF + (ofs))
@@ -159,6 +163,9 @@
 // Both ICMPv4 and ICMPv6 start with u8 type, u8 code
 #define BPF_LOAD_NETX_RELATIVE_ICMP_TYPE BPF_LOAD_NETX_RELATIVE_L4_U8(0)
 #define BPF_LOAD_NETX_RELATIVE_ICMP_CODE BPF_LOAD_NETX_RELATIVE_L4_U8(1)
+
+// IGMP start with u8 type
+#define BPF_LOAD_NETX_RELATIVE_IGMP_TYPE BPF_LOAD_NETX_RELATIVE_L4_U8(0)
 
 // IPv6 extension headers (HOPOPTS, DSTOPS, FRAG) begin with a u8 nexthdr
 #define BPF_LOAD_NETX_RELATIVE_V6EXTHDR_NEXTHDR BPF_LOAD_NETX_RELATIVE_L4_U8(0)

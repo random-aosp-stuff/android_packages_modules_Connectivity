@@ -16,13 +16,13 @@
 package com.android.server.net.ct;
 
 import android.annotation.RequiresApi;
-import android.content.Context;
 import android.os.Build;
 import android.provider.DeviceConfig;
 import android.provider.DeviceConfig.Properties;
 import android.text.TextUtils;
 import android.util.Log;
 
+import java.security.GeneralSecurityException;
 import java.util.concurrent.Executors;
 
 /** Listener class for the Certificate Transparency Phenotype flags. */
@@ -32,17 +32,21 @@ class CertificateTransparencyFlagsListener implements DeviceConfig.OnPropertiesC
     private static final String TAG = "CertificateTransparencyFlagsListener";
 
     private final DataStore mDataStore;
+    private final SignatureVerifier mSignatureVerifier;
     private final CertificateTransparencyDownloader mCertificateTransparencyDownloader;
 
-    CertificateTransparencyFlagsListener(Context context) {
-        mDataStore = new DataStore(Config.PREFERENCES_FILE);
-        mCertificateTransparencyDownloader =
-                new CertificateTransparencyDownloader(context, mDataStore);
+    CertificateTransparencyFlagsListener(
+            DataStore dataStore,
+            SignatureVerifier signatureVerifier,
+            CertificateTransparencyDownloader certificateTransparencyDownloader) {
+        mDataStore = dataStore;
+        mSignatureVerifier = signatureVerifier;
+        mCertificateTransparencyDownloader = certificateTransparencyDownloader;
     }
 
     void initialize() {
         mDataStore.load();
-        mCertificateTransparencyDownloader.registerReceiver();
+        mCertificateTransparencyDownloader.initialize();
         DeviceConfig.addOnPropertiesChangedListener(
                 Config.NAMESPACE_NETWORK_SECURITY, Executors.newSingleThreadExecutor(), this);
         if (Config.DEBUG) {
@@ -57,21 +61,35 @@ class CertificateTransparencyFlagsListener implements DeviceConfig.OnPropertiesC
             return;
         }
 
+        String newPublicKey =
+                DeviceConfig.getString(
+                        Config.NAMESPACE_NETWORK_SECURITY,
+                        Config.FLAG_PUBLIC_KEY,
+                        /* defaultValue= */ "");
         String newVersion =
-                DeviceConfig.getString(Config.NAMESPACE_NETWORK_SECURITY, Config.FLAG_VERSION, "");
+                DeviceConfig.getString(
+                        Config.NAMESPACE_NETWORK_SECURITY,
+                        Config.FLAG_VERSION,
+                        /* defaultValue= */ "");
         String newContentUrl =
                 DeviceConfig.getString(
-                        Config.NAMESPACE_NETWORK_SECURITY, Config.FLAG_CONTENT_URL, "");
+                        Config.NAMESPACE_NETWORK_SECURITY,
+                        Config.FLAG_CONTENT_URL,
+                        /* defaultValue= */ "");
         String newMetadataUrl =
                 DeviceConfig.getString(
-                        Config.NAMESPACE_NETWORK_SECURITY, Config.FLAG_METADATA_URL, "");
-        if (TextUtils.isEmpty(newVersion)
+                        Config.NAMESPACE_NETWORK_SECURITY,
+                        Config.FLAG_METADATA_URL,
+                        /* defaultValue= */ "");
+        if (TextUtils.isEmpty(newPublicKey)
+                || TextUtils.isEmpty(newVersion)
                 || TextUtils.isEmpty(newContentUrl)
                 || TextUtils.isEmpty(newMetadataUrl)) {
             return;
         }
 
         if (Config.DEBUG) {
+            Log.d(TAG, "newPublicKey=" + newPublicKey);
             Log.d(TAG, "newVersion=" + newVersion);
             Log.d(TAG, "newContentUrl=" + newContentUrl);
             Log.d(TAG, "newMetadataUrl=" + newMetadataUrl);
@@ -88,13 +106,23 @@ class CertificateTransparencyFlagsListener implements DeviceConfig.OnPropertiesC
             return;
         }
 
+        try {
+            mSignatureVerifier.setPublicKey(newPublicKey);
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            Log.e(TAG, "Error setting the public Key", e);
+            return;
+        }
+
         // TODO: handle the case where there is already a pending download.
 
-        mDataStore.setProperty(Config.VERSION_PENDING, newVersion);
-        mDataStore.setProperty(Config.CONTENT_URL_PENDING, newContentUrl);
-        mDataStore.setProperty(Config.METADATA_URL_PENDING, newMetadataUrl);
+        mDataStore.setProperty(Config.CONTENT_URL, newContentUrl);
+        mDataStore.setProperty(Config.METADATA_URL, newMetadataUrl);
         mDataStore.store();
 
-        mCertificateTransparencyDownloader.startMetadataDownload(newMetadataUrl);
+        if (mCertificateTransparencyDownloader.startMetadataDownload() == -1) {
+            Log.e(TAG, "Metadata download not started.");
+        } else if (Config.DEBUG) {
+            Log.d(TAG, "Metadata download started successfully.");
+        }
     }
 }

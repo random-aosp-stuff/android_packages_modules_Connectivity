@@ -17,9 +17,11 @@
 package com.android.networkstack.tethering;
 
 import static android.Manifest.permission.ACCESS_NETWORK_STATE;
+import static android.Manifest.permission.NETWORK_SETTINGS;
 import static android.Manifest.permission.TETHER_PRIVILEGED;
 import static android.Manifest.permission.WRITE_SETTINGS;
 import static android.content.pm.PackageManager.PERMISSION_DENIED;
+import static android.net.TetheringManager.TETHERING_VIRTUAL;
 import static android.net.TetheringManager.TETHERING_WIFI;
 import static android.net.TetheringManager.TETHER_ERROR_NO_ACCESS_TETHERING_PERMISSION;
 import static android.net.TetheringManager.TETHER_ERROR_NO_CHANGE_TETHERING_PERMISSION;
@@ -33,12 +35,16 @@ import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import android.app.AppOpsManager;
 import android.app.UiAutomation;
 import android.content.Intent;
 import android.net.IIntResultListener;
@@ -79,7 +85,9 @@ import java.util.function.Supplier;
 public final class TetheringServiceTest {
     private static final String TEST_IFACE_NAME = "test_wlan0";
     private static final String TEST_CALLER_PKG = "com.android.shell";
+    private static final int TEST_CALLER_UID = 1234;
     private static final String TEST_ATTRIBUTION_TAG = null;
+    private static final String TEST_WRONG_PACKAGE = "wrong.package";
     @Mock private ITetheringEventCallback mITetheringEventCallback;
     @Rule public ServiceTestRule mServiceTestRule;
     private Tethering mTethering;
@@ -87,6 +95,7 @@ public final class TetheringServiceTest {
     private MockTetheringConnector mMockConnector;
     private ITetheringConnector mTetheringConnector;
     private UiAutomation mUiAutomation;
+    @Mock private AppOpsManager mAppOps;
 
     private class TestTetheringResult extends IIntResultListener.Stub {
         private int mResult = -1; // Default value that does not match any result code.
@@ -128,6 +137,10 @@ public final class TetheringServiceTest {
         mTetheringConnector = ITetheringConnector.Stub.asInterface(mMockConnector.getIBinder());
         final MockTetheringService service = mMockConnector.getService();
         mTethering = service.getTethering();
+        mMockConnector.setCallingUid(TEST_CALLER_UID);
+        mMockConnector.setPackageNameUid(TEST_CALLER_PKG, TEST_CALLER_UID);
+        doThrow(new SecurityException()).when(mAppOps).checkPackage(anyInt(),
+                eq(TEST_WRONG_PACKAGE));
     }
 
     @After
@@ -158,6 +171,10 @@ public final class TetheringServiceTest {
 
     private void runAsTetheringDisallowed(final TestTetheringCall test) throws Exception {
         runTetheringCall(test, false /* isTetheringAllowed */, TETHER_PRIVILEGED);
+    }
+
+    private void runAsNetworkSettings(final TestTetheringCall test) throws Exception {
+        runTetheringCall(test, true /* isTetheringAllowed */, NETWORK_SETTINGS, TETHER_PRIVILEGED);
     }
 
     private void runTetheringCall(final TestTetheringCall test, boolean isTetheringAllowed,
@@ -330,6 +347,15 @@ public final class TetheringServiceTest {
         });
 
         runAsTetherPrivileged((result) -> {
+            mTetheringConnector.startTethering(request, TEST_WRONG_PACKAGE,
+                    TEST_ATTRIBUTION_TAG, result);
+            verify(mTethering, never()).startTethering(
+                    eq(new TetheringRequest(request)), eq(TEST_WRONG_PACKAGE), eq(result));
+            result.assertResult(TETHER_ERROR_NO_CHANGE_TETHERING_PERMISSION);
+            verifyNoMoreInteractionsForTethering();
+        });
+
+        runAsTetherPrivileged((result) -> {
             runStartTethering(result, request);
             verifyNoMoreInteractionsForTethering();
         });
@@ -346,6 +372,32 @@ public final class TetheringServiceTest {
             verify(mTethering).isTetheringSupported();
             verify(mTethering).isTetheringAllowed();
             result.assertResult(TETHER_ERROR_UNSUPPORTED);
+            verifyNoMoreInteractionsForTethering();
+        });
+    }
+
+    @Test
+    public void testStartTetheringWithInterfaceSucceeds() throws Exception {
+        final TetheringRequestParcel request = new TetheringRequestParcel();
+        request.tetheringType = TETHERING_VIRTUAL;
+        request.interfaceName = "avf_tap_fixed";
+
+        runAsNetworkSettings((result) -> {
+            runStartTethering(result, request);
+            verifyNoMoreInteractionsForTethering();
+        });
+    }
+
+    @Test
+    public void testStartTetheringNoNetworkStackPermissionWithInterfaceFails() throws Exception {
+        final TetheringRequestParcel request = new TetheringRequestParcel();
+        request.tetheringType = TETHERING_VIRTUAL;
+        request.interfaceName = "avf_tap_fixed";
+
+        runAsTetherPrivileged((result) -> {
+            mTetheringConnector.startTethering(request, TEST_CALLER_PKG, TEST_ATTRIBUTION_TAG,
+                    result);
+            result.assertResult(TETHER_ERROR_NO_CHANGE_TETHERING_PERMISSION);
             verifyNoMoreInteractionsForTethering();
         });
     }
@@ -443,6 +495,13 @@ public final class TetheringServiceTest {
         runAsTetherPrivileged((none) -> {
             runRequestLatestTetheringEntitlementResult();
             verifyNoMoreInteractionsForTethering();
+        });
+
+        runAsTetherPrivileged((none) -> {
+            mTetheringConnector.requestLatestTetheringEntitlementResult(TETHERING_WIFI, result,
+                    true /* showEntitlementUi */, TEST_WRONG_PACKAGE, TEST_ATTRIBUTION_TAG);
+            result.assertResult(TETHER_ERROR_NO_CHANGE_TETHERING_PERMISSION);
+            verifyNoMoreInteractions(mTethering);
         });
 
         runAsWriteSettings((none) -> {

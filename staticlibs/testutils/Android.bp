@@ -33,6 +33,7 @@ java_library {
     ],
     static_libs: [
         "androidx.test.ext.junit",
+        "collector-device-lib",
         "kotlin-reflect",
         "libnanohttpd",
         "net-tests-utils-host-device-common",
@@ -96,13 +97,10 @@ java_test_host {
         "general-tests",
         "cts",
         "mts-networking",
-        "mcts-networking",
         "mts-tethering",
         "mcts-tethering",
-        "mcts-wifi",
-        "mcts-dnsresolver",
     ],
-    data: [":ConnectivityTestPreparer"],
+    device_common_data: [":ConnectivityTestPreparer"],
 }
 
 python_library_host {
